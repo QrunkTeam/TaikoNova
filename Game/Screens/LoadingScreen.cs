@@ -6,8 +6,8 @@ using TaikoNova.Game.Skin;
 namespace TaikoNova.Game.Screens;
 
 /// <summary>
-/// Minimal, clean loading screen — card with staggered reveals,
-/// thin accent line, quiet progress bar, smooth transitions.
+/// Minimal pre-level screen with full-bleed beatmap art, restrained
+/// typography, and a quiet progress transition.
 /// </summary>
 public class LoadingScreen : Screen
 {
@@ -32,7 +32,7 @@ public class LoadingScreen : Screen
     public LoadingScreen(GameEngine engine, TaikoGame game) : base(engine, game)
     {
         _background = new BackgroundManager(engine);
-        _background.DimLevel = 0.85f;
+        _background.DimLevel = 0.78f;
     }
 
     public void SetBeatmap(BeatmapData beatmap, bool withAudio)
@@ -109,83 +109,95 @@ public class LoadingScreen : Screen
         int sw    = Engine.ScreenWidth;
         int sh    = Engine.ScreenHeight;
 
-        float fadeA    = EaseOutCubic(_fadeIn) * (1f - _fadeOut);
-        float contentA = fadeA * EaseOutCubic(MathF.Min(1f, _fadeIn * 1.5f));
+        float fadeA = EaseOutCubic(_fadeIn) * (1f - EaseOutCubic(_fadeOut));
+        float titleT = EaseOutCubic(MathF.Min(1f, (float)_time * 2.4f));
+        float subT = EaseOutCubic(Math.Clamp(((float)_time - 0.12f) * 2.2f, 0f, 1f));
+        float detailT = EaseOutCubic(Math.Clamp(((float)_time - 0.26f) * 2.0f, 0f, 1f));
+        float progressT = EaseOutCubic(Math.Clamp(((float)_time - 0.40f) * 1.8f, 0f, 1f));
 
         batch.Begin(proj);
 
-        // ── Background ──
         if (_background.HasBackground)
         {
             _background.Render();
-            batch.Draw(px, 0, 0, sw, sh, 0f, 0f, 0.02f, 0.35f * fadeA);
         }
         else
         {
-            batch.Draw(px, 0, 0, sw, sh, 0.04f, 0.03f, 0.08f, 1f);
+            batch.Draw(px, 0, 0, sw, sh, 0.018f, 0.019f, 0.026f, 1f);
         }
 
-        // Soft vignette (top + bottom)
-        batch.Draw(px, 0, 0, sw, (int)(sh * 0.18f), 0f, 0f, 0f, 0.25f * fadeA);
-        batch.Draw(px, 0, (int)(sh * 0.82f), sw, (int)(sh * 0.18f), 0f, 0f, 0f, 0.25f * fadeA);
+        batch.Draw(px, 0, 0, sw, sh, 0f, 0f, 0f, 0.28f * fadeA);
+        batch.Draw(px, 0, 0, sw, 132f, 0f, 0f, 0f, 0.28f * fadeA);
+        batch.Draw(px, 0, sh - 190f, sw, 190f, 0f, 0f, 0f, 0.38f * fadeA);
 
-        // ── Card panel ──
-        float panelW = MathF.Min(520f, sw * 0.6f);
-        float panelH = _isPractice ? 200f : 280f;
-        float panelX = (sw - panelW) * 0.5f;
-        float slideUp = (1f - EaseOutCubic(MathF.Min(1f, _fadeIn * 2f))) * 30f;
-        float panelY = (sh - panelH) * 0.42f + slideUp;
+        font.DrawText(batch, "TaikoNova", 42f, 34f, 0.76f,
+            0.90f, 0.91f, 0.96f, 0.84f * fadeA);
 
-        // Panel bg
-        batch.Draw(px, panelX, panelY, panelW, panelH,
-            0.06f, 0.05f, 0.09f, 0.88f * contentA);
+        string state = _transitioning ? "ready" : "loading";
+        font.DrawTextRight(batch, state, sw - 42f, 34f, 0.58f,
+            0.56f, 0.58f, 0.64f, 0.76f * fadeA);
 
-        // Top accent line (sweeps from center)
-        float lineReveal = EaseOutCubic(MathF.Min(1f, (float)(_time * 2.5f)));
-        float lineW = panelW * lineReveal;
-        batch.Draw(px, panelX + (panelW - lineW) * 0.5f, panelY, lineW, 2f,
-            SkinConfig.Accent[0], SkinConfig.Accent[1], SkinConfig.Accent[2], 0.85f * contentA);
+        float centerX = sw * 0.5f;
+        float baseY = 266f + (1f - titleT) * 18f;
 
-        // ── Content ──
-        float cx = panelX + 28f;
-        float cw = panelW - 56f;
-        float cy = panelY + 22f;
+        string title = _isPractice ? "Practice Mode" : _beatmap.DisplayTitle;
+        float titleScale = 1.54f;
+        float maxTitleW = MathF.Max(220f, sw - 300f);
+        FitText(font, title, ref titleScale, maxTitleW, 0.94f);
+        if (font.MeasureWidth(title, titleScale) > maxTitleW)
+            title = TruncateToFit(font, title, titleScale, maxTitleW);
+        float titleW = font.MeasureWidth(title, titleScale);
+        font.DrawTextShadow(batch, title, centerX - titleW * 0.5f, baseY, titleScale,
+            0.96f, 0.97f, 1f, fadeA * titleT, 3f);
 
-        float bounce = EaseOutBack(MathF.Min(1f, _titleScale));
+        float underlineW = MathF.Min(titleW, 340f) * titleT;
+        if (underlineW > 2f)
+        {
+            batch.Draw(px, centerX - underlineW * 0.5f,
+                baseY + font.MeasureHeight(titleScale) + 10f, underlineW, 2f,
+                SkinConfig.Accent[0], SkinConfig.Accent[1], SkinConfig.Accent[2],
+                0.46f * fadeA);
+        }
 
-        if (_isPractice)
-            RenderPractice(batch, font, px, cx, cw, cy, bounce, contentA);
-        else
-            RenderBeatmap(batch, font, px, cx, cw, cy, bounce, contentA);
+        float y = baseY + font.MeasureHeight(titleScale) + 34f;
+        string subtitle = _isPractice ? "Generated patterns / 160 BPM" : _beatmap.DisplayArtist;
+        subtitle = TruncateToFit(font, subtitle, 0.72f, MathF.Max(180f, sw - 380f));
+        float subtitleW = font.MeasureWidth(subtitle, 0.72f);
+        font.DrawText(batch, subtitle, centerX - subtitleW * 0.5f,
+            y + (1f - subT) * 8f, 0.72f,
+            0.62f, 0.64f, 0.70f, 0.88f * fadeA * subT);
 
-        // ── Progress bar (below card) ──
-        float barW = panelW * 0.75f;
+        y += 58f;
+        string detail = _isPractice
+            ? "Warmup    No audio"
+            : BuildDetailLine();
+        detail = TruncateToFit(font, detail, 0.54f, MathF.Max(160f, sw - 460f));
+        float detailW = font.MeasureWidth(detail, 0.54f);
+        font.DrawText(batch, detail, centerX - detailW * 0.5f,
+            y + (1f - detailT) * 6f, 0.54f,
+            0.46f, 0.48f, 0.54f, 0.82f * fadeA * detailT);
+
+        float barW = MathF.Min(620f, MathF.Max(180f, sw - 420f));
         float barX = (sw - barW) * 0.5f;
-        float barY = panelY + panelH + 28f + slideUp;
-
-        // Track
+        float barY = sh - 112f;
         batch.Draw(px, barX, barY, barW, 2f,
-            0.15f, 0.14f, 0.2f, 0.5f * fadeA);
-        // Fill
-        float fillW = barW * _progressBar;
-        if (fillW > 1)
-        {
-            batch.Draw(px, barX, barY, fillW, 2f,
-                SkinConfig.Accent[0], SkinConfig.Accent[1], SkinConfig.Accent[2], 0.8f * fadeA);
-        }
+            0.22f, 0.23f, 0.28f, 0.48f * fadeA * progressT);
 
-        // ── Skip hint ──
+        float fillW = barW * _progressBar * progressT;
+        if (fillW > 1f)
+            batch.Draw(px, barX, barY, fillW, 2f,
+                SkinConfig.Accent[0], SkinConfig.Accent[1], SkinConfig.Accent[2],
+                0.76f * fadeA);
+
         if (!_transitioning && _time > 1.0f)
         {
-            float hintT = MathF.Min(1f, ((float)_time - 1f) * 2.5f);
-            float pulse = 0.3f + MathF.Sin((float)_time * 2.5f) * 0.08f;
-            string hint = "press enter to skip";
-            float hintW = font.MeasureWidth(hint, 0.5f);
-            font.DrawText(batch, hint, (sw - hintW) * 0.5f, barY + 16, 0.5f,
-                0.4f, 0.4f, 0.5f, hintT * pulse * fadeA);
+            float hintT = EaseOutCubic(Math.Clamp(((float)_time - 1f) * 2.4f, 0f, 1f));
+            string hint = "enter to skip";
+            float hintW = font.MeasureWidth(hint, 0.44f);
+            font.DrawText(batch, hint, centerX - hintW * 0.5f, barY + 22f, 0.44f,
+                0.40f, 0.42f, 0.48f, hintT * 0.58f * fadeA);
         }
 
-        // ── Fade-out ──
         if (_fadeOut > 0.2f)
         {
             float t = (_fadeOut - 0.2f) / 0.8f;
@@ -322,6 +334,47 @@ public class LoadingScreen : Screen
         float delay = row * 0.08f + 0.15f;
         float t = MathF.Max(0f, ((float)_time - delay) / 0.28f);
         return MathF.Min(1f, t);
+    }
+
+    private string BuildDetailLine()
+    {
+        if (_beatmap == null) return "";
+
+        var parts = new List<string>();
+        if (!string.IsNullOrEmpty(_beatmap.Version))
+            parts.Add(_beatmap.Version);
+        parts.Add($"OD {_beatmap.OverallDifficulty:F1}");
+
+        if (_beatmap.TimingPoints.Count > 0)
+        {
+            double bpm = 60000.0 / _beatmap.TimingPoints[0].BeatLength;
+            parts.Add($"{bpm:F0} BPM");
+        }
+
+        if (_beatmap.HitObjects.Count > 0)
+            parts.Add($"{_beatmap.HitObjects.Count} objects");
+
+        return string.Join("    ", parts);
+    }
+
+    private static void FitText(Engine.Text.BitmapFont font, string text,
+        ref float scale, float maxWidth, float minScale)
+    {
+        while (scale > minScale && font.MeasureWidth(text, scale) > maxWidth)
+            scale -= 0.05f;
+    }
+
+    private static string TruncateToFit(Engine.Text.BitmapFont font, string text,
+        float scale, float maxWidth)
+    {
+        if (font.MeasureWidth(text, scale) <= maxWidth) return text;
+        for (int len = text.Length - 1; len > 0; len--)
+        {
+            string truncated = text[..len] + "..";
+            if (font.MeasureWidth(truncated, scale) <= maxWidth)
+                return truncated;
+        }
+        return "..";
     }
 
     private static float[] GetOdColor(float od)

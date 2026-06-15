@@ -14,11 +14,13 @@ namespace TaikoNova.Game;
 public sealed class TaikoGame : IDisposable
 {
     private readonly GameEngine _engine;
+    private readonly GameLaunchOptions _launchOptions;
 
     // ── Settings ──
     public SettingsManager Settings { get; }
     public SettingsOverlay SettingsOverlay { get; }
     public NotificationOverlay Notifications { get; }
+    public bool AutoPlay => _launchOptions.AutoPlay;
 
     // ── Screens ──
     private readonly MainMenuScreen _mainMenu;
@@ -39,9 +41,10 @@ public sealed class TaikoGame : IDisposable
     private Action? _transAction;       // runs at the midpoint (screen switch)
     private const float TransFadeSpeed = 5.0f;
 
-    public TaikoGame(GameEngine engine)
+    public TaikoGame(GameEngine engine, GameLaunchOptions? launchOptions = null)
     {
         _engine = engine;
+        _launchOptions = launchOptions ?? GameLaunchOptions.Default;
 
         // Load settings first so screens can use them
         Settings = SettingsManager.Load();
@@ -65,6 +68,8 @@ public sealed class TaikoGame : IDisposable
         Console.WriteLine("[Game] Controls: D/F = Don (center), J/K = Kat (rim)");
         Console.WriteLine("[Game] Auto-detects osu! stable & lazer installations.");
         Console.WriteLine("[Game] You can also drop .osz/.osu files into a 'Songs' folder.");
+        if (AutoPlay)
+            Console.WriteLine("[Game] AutoPlay enabled via launch option.");
     }
 
     public void Update(double deltaTime)

@@ -42,13 +42,15 @@ public sealed class GameEngine : GameWindow
     private int _fbW, _fbH;
 
     // ── Game ──
+    private readonly GameLaunchOptions _launchOptions;
     private TaikoGame? _game;
 
     // ── Timing ──
     public double TotalTime { get; private set; }
     public double DeltaTime { get; private set; }
 
-    public GameEngine(int width, int height, string title)
+    public GameEngine(int width, int height, string title,
+        GameLaunchOptions? launchOptions = null)
         : base(
             new GameWindowSettings { UpdateFrequency = 480 },
             new NativeWindowSettings
@@ -60,6 +62,7 @@ public sealed class GameEngine : GameWindow
                 NumberOfSamples = 4 // MSAA
             })
     {
+        _launchOptions = launchOptions ?? GameLaunchOptions.Default;
         ScreenWidth = width;
         ScreenHeight = height;
         VSync = VSyncMode.Adaptive;
@@ -89,7 +92,7 @@ public sealed class GameEngine : GameWindow
         UpdateProjection();
 
         // Create game
-        _game = new TaikoGame(this);
+        _game = new TaikoGame(this, _launchOptions);
 
         // Wire up input events
         MouseWheel += e => Input.OnMouseWheel(e.OffsetY);

@@ -1,4 +1,7 @@
 using TaikoNova.Engine;
+using TaikoNova.Game;
 
-using var engine = new GameEngine(1600, 900, "TaikoNova");
+var launchOptions = GameLaunchOptions.FromArgs(args);
+
+using var engine = new GameEngine(1600, 900, "TaikoNova", launchOptions);
 engine.Run();
