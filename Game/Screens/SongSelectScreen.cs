@@ -86,6 +86,8 @@ public class SongSelectScreen : Screen
     private const float CardRadius  = 6f;
     private const float SearchBarH  = 42f;
 
+    public IReadOnlyList<BeatmapInfo> Beatmaps => _beatmaps;
+
     public SongSelectScreen(GameEngine engine, TaikoGame game) : base(engine, game)
     {
         _cardSlide = Array.Empty<float>();
@@ -464,23 +466,27 @@ public class SongSelectScreen : Screen
                 MoveDifficulty(1);
         }
 
+        int selectionStep = Game.LevelSelectGridLayout
+            ? Math.Max(1, GetGridLayout(Engine.ScreenWidth, Engine.ScreenHeight, totalItems).Columns)
+            : 1;
+
         if (upPressed)
         {
-            MoveSelection(-1);
-            _repeatDir = -1;
+            MoveSelection(-selectionStep);
+            _repeatDir = -selectionStep;
             _repeatTimer = RepeatDelay;
         }
         else if (downPressed)
         {
-            MoveSelection(1);
-            _repeatDir = 1;
+            MoveSelection(selectionStep);
+            _repeatDir = selectionStep;
             _repeatTimer = RepeatDelay;
         }
 
         // Key repeat while held
         if (_repeatDir != 0)
         {
-            bool held = _repeatDir == -1 ? upHeld : downHeld;
+                bool held = _repeatDir < 0 ? upHeld : downHeld;
             if (!held)
             {
                 _repeatDir = 0;
@@ -500,14 +506,19 @@ public class SongSelectScreen : Screen
         float scroll = input.ScrollDelta;
         if (MathF.Abs(scroll) > 0.01f)
         {
-            int steps = -(int)MathF.Round(scroll * 3f); // 3 cards per scroll notch
+            float scrollScale = Game.LevelSelectGridLayout
+                ? Math.Max(1, GetGridLayout(Engine.ScreenWidth, Engine.ScreenHeight, totalItems).Columns)
+                : 3f;
+            int steps = -(int)MathF.Round(scroll * scrollScale);
             if (steps != 0)
                 MoveSelection(steps);
         }
 
         if (input.MousePressed)
         {
-            if (!TrySelectDifficultyAt(input.MouseX, input.MouseY))
+            if (Game.LevelSelectGridLayout)
+                TrySelectGridItemAt(input.MouseX, input.MouseY);
+            else if (!TrySelectDifficultyAt(input.MouseX, input.MouseY))
                 TrySelectQueueItemAt(input.MouseX, input.MouseY);
         }
 
@@ -575,10 +586,22 @@ public class SongSelectScreen : Screen
         }
 
         // ── Smooth scrolling ──
-        float listH = Engine.ScreenHeight - TopBarH - BottomBarH - 114f
-                     - (_searchBarReveal > 0.01f ? SearchBarH * _searchBarReveal : 0f);
-        _targetScroll = _selectedFilterIdx * CardItemH - listH * 0.35f;
-        float maxScroll = MathF.Max(0, totalItems * CardItemH - listH + CardItemH);
+        float maxScroll;
+        if (Game.LevelSelectGridLayout)
+        {
+            var grid = GetGridLayout(Engine.ScreenWidth, Engine.ScreenHeight, totalItems);
+            int row = Math.Max(0, _selectedFilterIdx) / Math.Max(1, grid.Columns);
+            int rows = (int)MathF.Ceiling(totalItems / (float)Math.Max(1, grid.Columns));
+            _targetScroll = row * grid.Pitch - grid.Height * 0.28f;
+            maxScroll = MathF.Max(0f, rows * grid.Pitch - grid.Height + grid.Gap);
+        }
+        else
+        {
+            float listH = Engine.ScreenHeight - TopBarH - BottomBarH - 114f
+                         - (_searchBarReveal > 0.01f ? SearchBarH * _searchBarReveal : 0f);
+            _targetScroll = _selectedFilterIdx * CardItemH - listH * 0.35f;
+            maxScroll = MathF.Max(0, totalItems * CardItemH - listH + CardItemH);
+        }
         _targetScroll = MathF.Max(0, MathF.Min(_targetScroll, maxScroll));
         _scrollOffset = Lerp(_scrollOffset, _targetScroll, (float)dt * 12f);
 
@@ -708,6 +731,38 @@ public class SongSelectScreen : Screen
         return false;
     }
 
+    private bool TrySelectGridItemAt(float mx, float my)
+    {
+        int totalItems = _filteredIndices.Count + 1;
+        var grid = GetGridLayout(Engine.ScreenWidth, Engine.ScreenHeight, totalItems);
+        if (mx < grid.X || mx > grid.X + grid.Columns * grid.Pitch - grid.Gap)
+            return false;
+        if (my < grid.Y || my > grid.Bottom)
+            return false;
+
+        for (int idx = 0; idx < totalItems; idx++)
+        {
+            int row = idx / grid.Columns;
+            int col = idx % grid.Columns;
+            float x = grid.X + col * grid.Pitch;
+            float y = grid.Y + row * grid.Pitch - _scrollOffset;
+
+            if (mx < x || mx > x + grid.Tile || my < y || my > y + grid.Tile)
+                continue;
+
+            _selectionDirection = Math.Sign(idx - _selectedFilterIdx);
+            if (_selectionDirection == 0)
+                _selectionDirection = 1;
+            _selectedFilterIdx = idx;
+            _selectionFlash = 1f;
+            _previewDelay = 0.22;
+            ResetCardSlides();
+            return true;
+        }
+
+        return false;
+    }
+
     private void ResetCardSlides()
     {
         for (int i = 0; i < _cardSlide.Length; i++)
@@ -718,6 +773,13 @@ public class SongSelectScreen : Screen
 
     private void UpdateAudioPreview(double dt)
     {
+        if (Game.TopBarOwnsMusic)
+        {
+            _previewPlaying = false;
+            _previewLoadedIndex = -1;
+            return;
+        }
+
         int bmIdx = SelectedBeatmapIndex;
 
         // Fade preview volume
@@ -786,7 +848,8 @@ public class SongSelectScreen : Screen
     private void StopPreview()
     {
         _previewPlaying = false;
-        Engine.Audio.StopMusic();
+        if (!Game.TopBarOwnsMusic)
+            Engine.Audio.StopMusic();
     }
 
     private string ResolveAudioPath(BeatmapInfo bm)
@@ -867,8 +930,13 @@ public class SongSelectScreen : Screen
 
         DrawMinimalBackdrop(batch, px, sw, sh, fadeA);
         DrawMinimalHeader(batch, font, px, sw, fadeA);
-        DrawMinimalSelection(batch, font, px, sw, sh, fadeA, exitSlide);
-        DrawMinimalQueue(batch, font, px, sw, sh, totalItems, fadeA, exitSlide);
+        if (Game.LevelSelectGridLayout)
+            DrawGridLevelList(batch, font, px, sw, sh, totalItems, fadeA, exitSlide);
+        else
+        {
+            DrawMinimalSelection(batch, font, px, sw, sh, fadeA, exitSlide);
+            DrawMinimalQueue(batch, font, px, sw, sh, totalItems, fadeA, exitSlide);
+        }
         DrawMinimalControls(batch, font, sw, sh, fadeA);
 
         if (_exiting)
@@ -894,24 +962,26 @@ public class SongSelectScreen : Screen
     private void DrawMinimalHeader(SpriteBatch batch, Engine.Text.BitmapFont font,
         Texture2D px, int sw, float fadeA)
     {
-        font.DrawText(batch, "TaikoNova", 42f, 34f, 0.76f,
+        float headerY = TaikoGame.GlobalTopBarHeight + 18f;
+        font.DrawText(batch, "TaikoNova", 42f, headerY, 0.76f,
             0.90f, 0.91f, 0.96f, 0.88f * fadeA);
 
         string count = _searchQuery.Length > 0
             ? $"{_filteredIndices.Count}/{_beatmapGroups.Count}"
             : $"{_beatmapGroups.Count}";
-        font.DrawTextRight(batch, $"{count} songs", sw - 42f, 34f, 0.58f,
+        font.DrawTextRight(batch, $"{count} songs", sw - 42f, headerY, 0.58f,
             0.56f, 0.58f, 0.64f, 0.76f * fadeA);
 
         if (_searchActive || _searchQuery.Length > 0)
         {
             float w = 460f;
             float x = (sw - w) * 0.5f;
-            DrawRoundedRect(batch, px, x, 26f, w, 42f, 21f,
+            float searchY = TaikoGame.GlobalTopBarHeight + 14f;
+            DrawRoundedRect(batch, px, x, searchY, w, 42f, 21f,
                 0.04f, 0.045f, 0.060f, 0.82f * fadeA);
             string text = _searchQuery.Length > 0 ? _searchQuery : "search";
             text = TruncateToFit(font, text, 0.58f, w - 62f);
-            font.DrawText(batch, text, x + 28f, 39f, 0.58f,
+            font.DrawText(batch, text, x + 28f, searchY + 13f, 0.58f,
                 _searchQuery.Length > 0 ? 0.84f : 0.45f,
                 _searchQuery.Length > 0 ? 0.86f : 0.46f,
                 _searchQuery.Length > 0 ? 0.92f : 0.52f,
@@ -919,7 +989,7 @@ public class SongSelectScreen : Screen
             if (_searchActive && _searchCursorBlink < 0.5f)
             {
                 float curX = x + 30f + font.MeasureWidth(text, 0.58f);
-                batch.Draw(px, curX, 38f, 2f, 20f, 1f, 1f, 1f, 0.55f * fadeA);
+                batch.Draw(px, curX, searchY + 12f, 2f, 20f, 1f, 1f, 1f, 0.55f * fadeA);
             }
         }
     }
@@ -1041,6 +1111,155 @@ public class SongSelectScreen : Screen
         float posW = font.MeasureWidth(pos, 0.46f);
         font.DrawText(batch, pos, centerX - posW * 0.5f, y + 58f, 0.46f,
             0.44f, 0.46f, 0.52f, 0.70f * fadeA);
+    }
+
+    private void DrawGridLevelList(SpriteBatch batch, Engine.Text.BitmapFont font,
+        Texture2D px, int sw, int sh, int totalItems, float fadeA, float exitSlide)
+    {
+        var grid = GetGridLayout(sw, sh, totalItems);
+        float reveal = EaseOutCubic(Clamp01(_infoReveal));
+
+        if (_filteredIndices.Count == 0 && _searchQuery.Length > 0)
+        {
+            string empty = "No maps match";
+            float ew = font.MeasureWidth(empty, 0.70f);
+            font.DrawText(batch, empty, (sw - ew) * 0.5f, grid.Y + 38f, 0.70f,
+                0.70f, 0.72f, 0.80f, 0.70f * fadeA);
+            return;
+        }
+
+        for (int idx = 0; idx < totalItems; idx++)
+        {
+            int row = idx / grid.Columns;
+            int col = idx % grid.Columns;
+            float tileX = grid.X + col * grid.Pitch;
+            float tileY = grid.Y + row * grid.Pitch - _scrollOffset;
+            if (tileY + grid.Tile < grid.Y - 12f || tileY > grid.Bottom + 12f)
+                continue;
+
+            bool selected = idx == _selectedFilterIdx;
+            float edgeFade = MathF.Min(
+                Clamp01((tileY + grid.Tile - grid.Y) / 36f),
+                Clamp01((grid.Bottom - tileY) / 36f));
+            if (edgeFade <= 0.01f) continue;
+
+            float slide = idx < _cardSlide.Length ? _cardSlide[idx] * 0.16f : 0f;
+            float pop = selected ? EaseOutCubic(_selectionFlash) * 4f : 0f;
+            DrawGridTile(batch, font, px,
+                tileX + slide + exitSlide * 0.12f,
+                tileY - pop + (selected ? (1f - reveal) * 5f : 0f),
+                grid.Tile,
+                idx,
+                selected,
+                fadeA * edgeFade);
+        }
+
+        DrawGridScroll(batch, px, grid, totalItems, fadeA);
+    }
+
+    private void DrawGridTile(SpriteBatch batch, Engine.Text.BitmapFont font,
+        Texture2D px, float x, float y, float size, int filterIdx, bool selected, float fadeA)
+    {
+        bool practice = IsPracticeItem(filterIdx);
+        float[] accent = practice ? SkinConfig.DrumrollColor : GetOdColor(GetItemOd(filterIdx));
+        float glowA = selected ? (0.15f + _selectGlow * 0.06f) * fadeA : 0f;
+
+        if (selected)
+        {
+            DrawRoundedRect(batch, px, x - 5f, y - 5f, size + 10f, size + 10f, 8f,
+                accent[0], accent[1], accent[2], glowA);
+        }
+
+        DrawRoundedRect(batch, px, x, y, size, size, 8f,
+            selected ? 0.074f : 0.044f,
+            selected ? 0.078f : 0.046f,
+            selected ? 0.096f : 0.060f,
+            selected ? 0.92f * fadeA : 0.74f * fadeA);
+        DrawRoundedRect(batch, px, x + 12f, y + 12f, size - 24f, 1f, 0.5f,
+            1f, 1f, 1f, (selected ? 0.13f : 0.06f) * fadeA);
+
+        if (selected && _selectionFlash > 0.01f)
+        {
+            DrawRoundedRect(batch, px, x, y, size, size, 8f,
+                1f, 1f, 1f, _selectionFlash * 0.08f * fadeA);
+        }
+
+        string index = (Math.Min(filterIdx + 1, _filteredIndices.Count + 1)).ToString("00");
+        font.DrawText(batch, index, x + 14f, y + 18f, 0.36f,
+            accent[0], accent[1], accent[2], 0.72f * fadeA);
+
+        string title = TruncateToFit(font, GetItemTitle(filterIdx), selected ? 0.58f : 0.50f, size - 28f);
+        font.DrawText(batch, title, x + 14f, y + 46f, selected ? 0.58f : 0.50f,
+            selected ? 0.95f : 0.76f,
+            selected ? 0.96f : 0.78f,
+            selected ? 1.00f : 0.86f,
+            fadeA);
+
+        string sub = TruncateToFit(font, GetItemSubtitle(filterIdx), 0.38f, size - 28f);
+        font.DrawText(batch, sub, x + 14f, y + 72f, 0.38f,
+            0.46f, 0.48f, 0.56f, 0.78f * fadeA);
+
+        string diff = $"{GetItemDifficultyLabel(filterIdx)} / {GetItemOdLabel(filterIdx)}";
+        diff = TruncateToFit(font, diff, 0.38f, size - 28f);
+        font.DrawText(batch, diff, x + 14f, y + size - 50f, 0.38f,
+            accent[0], accent[1], accent[2], 0.86f * fadeA);
+
+        DrawGridDifficultyStrip(batch, px, x + 14f, y + size - 22f, size - 28f,
+            filterIdx, selected, fadeA);
+    }
+
+    private void DrawGridDifficultyStrip(SpriteBatch batch, Texture2D px,
+        float x, float y, float w, int filterIdx, bool selected, float fadeA)
+    {
+        var group = GetGroupAtFilterIndex(filterIdx);
+        if (group == null || group.BeatmapIndices.Count == 0)
+        {
+            DrawRoundedRect(batch, px, x, y, w, 5f, 2.5f,
+                SkinConfig.DrumrollColor[0], SkinConfig.DrumrollColor[1], SkinConfig.DrumrollColor[2], 0.72f * fadeA);
+            return;
+        }
+
+        int count = Math.Min(group.BeatmapIndices.Count, 8);
+        float gap = 5f;
+        float segW = (w - gap * (count - 1)) / count;
+        for (int i = 0; i < count; i++)
+        {
+            int bmIdx = group.BeatmapIndices[i];
+            if (bmIdx < 0 || bmIdx >= _beatmaps.Count) continue;
+            var style = GetDifficultyStyle(_beatmaps[bmIdx].OD);
+            bool current = i == group.SelectedDifficultyIndex;
+            float sx = x + i * (segW + gap);
+            DrawRoundedRect(batch, px, sx, y, segW, current && selected ? 7f : 5f, 2.5f,
+                style.Color[0], style.Color[1], style.Color[2],
+                (current ? 0.92f : 0.46f) * fadeA);
+            if (style.Label == "NO LOGIC")
+            {
+                DrawRoundedRect(batch, px, sx + segW * 0.50f, y, segW * 0.50f,
+                    current && selected ? 7f : 5f, 2.5f,
+                    1f, 1f, 1f, (current ? 0.70f : 0.34f) * fadeA);
+            }
+        }
+    }
+
+    private void DrawGridScroll(SpriteBatch batch, Texture2D px,
+        (float X, float Y, float Tile, float Gap, float Pitch, float Bottom, float Height, int Columns) grid,
+        int totalItems, float fadeA)
+    {
+        int rows = (int)MathF.Ceiling(totalItems / (float)Math.Max(1, grid.Columns));
+        if (rows <= 1) return;
+
+        float contentH = rows * grid.Pitch;
+        if (contentH <= grid.Height) return;
+
+        float trackX = grid.X + grid.Columns * grid.Pitch - grid.Gap + 12f;
+        float thumbH = MathF.Max(30f, grid.Height * (grid.Height / contentH));
+        float maxScroll = MathF.Max(1f, contentH - grid.Height);
+        float thumbY = grid.Y + (grid.Height - thumbH) * Clamp01(_scrollOffset / maxScroll);
+
+        DrawRoundedRect(batch, px, trackX, grid.Y, 4f, grid.Height, 2f,
+            1f, 1f, 1f, 0.06f * fadeA);
+        DrawRoundedRect(batch, px, trackX - 1f, thumbY, 6f, thumbH, 3f,
+            SkinConfig.Accent[0], SkinConfig.Accent[1], SkinConfig.Accent[2], 0.58f * fadeA);
     }
 
     private void DrawDifficultySelector(SpriteBatch batch, Engine.Text.BitmapFont font,
@@ -2482,6 +2701,26 @@ public class SongSelectScreen : Screen
     // ═══════════════════════════════════════════════════════════════════
     //  Helpers
     // ═══════════════════════════════════════════════════════════════════
+
+    private static (float X, float Y, float Tile, float Gap, float Pitch,
+        float Bottom, float Height, int Columns) GetGridLayout(int sw, int sh, int totalItems)
+    {
+        float sidePad = Math.Clamp(sw * 0.055f, 52f, 92f);
+        float top = TaikoGame.GlobalTopBarHeight + 88f;
+        float bottom = sh - 86f;
+        float gap = 16f;
+        float available = MathF.Max(260f, sw - sidePad * 2f);
+        int columns = Math.Clamp((int)MathF.Floor((available + gap) / (170f + gap)), 2, 8);
+        float tile = MathF.Floor((available - gap * (columns - 1)) / columns);
+        tile = Math.Clamp(tile, 124f, 184f);
+
+        float totalW = tile * columns + gap * (columns - 1);
+        float x = (sw - totalW) * 0.5f;
+        float pitch = tile + gap;
+        float height = MathF.Max(tile, bottom - top);
+
+        return (x, top, tile, gap, pitch, bottom, height, columns);
+    }
 
     private static (float X, float Y, float Width, float Height, float Gap)
         GetDifficultyChipLayout(int sw, int count, float y)

@@ -969,7 +969,7 @@ public class GameplayScreen : Screen
         var pixel = Engine.PixelTex;
         int sw = Engine.ScreenWidth;
         int sh = Engine.ScreenHeight;
-        float m = SkinConfig.HudMargin;
+        float m = SkinConfig.HudMargin + TaikoGame.GlobalTopBarHeight;
         float right = sw - m;
 
         // ── HP bar (chunky pixel bar, top) ──

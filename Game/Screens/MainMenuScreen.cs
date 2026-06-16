@@ -32,12 +32,6 @@ public class MainMenuScreen : Screen
     private float _confirmAnim;    // 0→1 exit animation
     private bool _confirming;
 
-    // ── Layout ──
-    private const float TopBarH    = 48f;
-    private const float BottomBarH = 44f;
-    private const float ItemH      = 74f;
-    private const float ItemGap    = 10f;
-
     // ── Background music / image ──
     private List<BeatmapInfo> _beatmaps = new();
     private bool _scanned;
@@ -56,6 +50,8 @@ public class MainMenuScreen : Screen
     private static readonly float[] AccentPractice = { 0.90f, 0.72f, 0.20f }; // gold
     private static readonly float[] AccentSettings = { 0.45f, 0.80f, 0.50f }; // green
     private static readonly float[] AccentExit     = { 0.86f, 0.24f, 0.18f }; // red
+
+    public IReadOnlyList<BeatmapInfo> Beatmaps => _beatmaps;
 
     public MainMenuScreen(GameEngine engine, TaikoGame game) : base(engine, game)
     {
@@ -91,15 +87,27 @@ public class MainMenuScreen : Screen
             _scanned = true;
         }
 
-        PickRandomBackground();
+        if (!Game.TopBarOwnsMusic || !Engine.Audio.IsMusicLoaded)
+            PickRandomBackground();
     }
 
     public override void OnExit()
     {
         // Fade out / stop music when leaving menu
         Engine.Audio.StopMusic();
+        Game.ReleaseTopBarMusicControl();
         _background.Unload();
         _musicStarted = false;
+    }
+
+    public void SetManualAmbient(BeatmapInfo beatmap)
+    {
+        _nowPlaying = beatmap;
+        _musicStarted = false;
+        _changingTrack = false;
+        _trackEndDelay = 0;
+        _musicVolume = 1f;
+        _musicTarget = 1f;
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -286,7 +294,12 @@ public class MainMenuScreen : Screen
         _bgFade = MathF.Min(1f, _bgFade + fdt * 1.5f);
 
         // Music volume management with smooth transitions
-        if (_musicStarted)
+        if (Game.TopBarOwnsMusic)
+        {
+            if (Engine.Audio.IsMusicLoaded)
+                Engine.Audio.SetMusicVolume(0.30f * Game.Settings.MasterVolume * Game.Settings.MusicVolume);
+        }
+        else if (_musicStarted)
         {
             // Smoothly lerp toward target
             float fadeSpeed = _musicTarget > _musicVolume ? 0.5f : 1.8f; // slow in, faster out
@@ -346,6 +359,27 @@ public class MainMenuScreen : Screen
             _selectBounce = 1f;
         }
 
+        if (MathF.Abs(input.ScrollDelta) > 0.01f)
+        {
+            int delta = -(int)MathF.Round(input.ScrollDelta);
+            if (delta != 0)
+            {
+                _selected = (_selected + delta + _items.Length) % _items.Length;
+                _selectBounce = 1f;
+            }
+        }
+
+        if (input.MousePressed && TrySelectItemAt(input.MouseX, input.MouseY))
+        {
+            if (_items[_selected].Label == "Settings")
+                _items[_selected].OnSelect();
+            else
+            {
+                _confirming = true;
+                _confirmAnim = 0;
+            }
+        }
+
         if (input.IsPressed(Keys.Enter) || input.IsPressed(Keys.Space))
         {
             // Settings opens overlay immediately (no confirm animation needed)
@@ -375,156 +409,58 @@ public class MainMenuScreen : Screen
         int sh    = Engine.ScreenHeight;
 
         float fadeA = EaseOutCubic(_enterAnim);
+        float confirmT = EaseOutCubic(_confirmAnim);
+        float contentA = fadeA * (1f - confirmT * 0.35f);
+        float[] selectedAccent = _items[_selected].Accent;
 
         batch.Begin(proj);
 
-        // ── Background ──
-        batch.Draw(px, 0, 0, sw, sh, 0.04f, 0.03f, 0.07f, 1f);
-
-        // Beatmap background image with crossfade
+        batch.Draw(px, 0, 0, sw, sh, 0.018f, 0.019f, 0.026f, 1f);
         if (_background.HasBackground)
         {
             float savedDim = _background.DimLevel;
-            // Blend dim from fully black → target dim as bgFade progresses
             _background.DimLevel = 1f - (1f - savedDim) * EaseOutCubic(_bgFade);
             _background.Render();
             _background.DimLevel = savedDim;
         }
 
-        // ── Menu items (centred) ──
-        float totalH = _items.Length * ItemH + (_items.Length - 1) * ItemGap;
-        float startY = (sh - totalH) * 0.5f + 10f; // nudge slightly below centre
-        float itemW  = MathF.Min(480f, sw * 0.50f);
-        float itemX  = (sw - itemW) * 0.5f;
+        batch.Draw(px, 0, 0, sw, sh, 0f, 0f, 0f, 0.34f * fadeA);
+        batch.Draw(px, 0, 0, MathF.Min(680f, sw * 0.52f), sh, 0f, 0f, 0f, 0.38f * fadeA);
+        batch.Draw(px, 0, 0, sw, 140f, 0f, 0f, 0f, 0.24f * fadeA);
+        batch.Draw(px, 0, sh - 170f, sw, 170f, 0f, 0f, 0f, 0.32f * fadeA);
+
+        var layout = GetMenuLayout(sw, sh);
+        float brandX = layout.X;
+        float brandY = 118f;
+
+        font.DrawText(batch, "TaikoNova", brandX, brandY, 1.58f,
+            0.94f, 0.95f, 1f, contentA);
+        float titleW = font.MeasureWidth("TaikoNova", 1.58f);
+        DrawRoundedRect(batch, brandX, brandY + 62f, MathF.Min(330f, titleW) * contentA, 2f, 1f,
+            selectedAccent[0], selectedAccent[1], selectedAccent[2], 0.58f * fadeA);
+
+        string mode = Game.AutoPlay ? "AUTO ENABLED" : "MAIN MENU";
+        font.DrawText(batch, mode, brandX, brandY - 34f, 0.48f,
+            selectedAccent[0], selectedAccent[1], selectedAccent[2], 0.74f * contentA);
+
+        string selectedDescription = _items[_selected].Description;
+        selectedDescription = TruncateToFit(font, selectedDescription, 0.54f, layout.W);
+        font.DrawText(batch, selectedDescription, brandX, brandY + 92f, 0.54f,
+            0.54f, 0.56f, 0.62f, 0.72f * contentA);
 
         for (int i = 0; i < _items.Length; i++)
         {
             float rowDelay = i * 0.10f + 0.15f;
             float rowT = MathF.Max(0f, ((float)_time - rowDelay) / 0.35f);
-            float rowAlpha = MathF.Min(1f, rowT) * fadeA;
-            float slideX = (1f - EaseOutCubic(MathF.Min(1f, rowT))) * 40f;
-
-            bool selected = i == _selected;
-            float[] accent = _items[i].Accent;
-            float y = startY + i * (ItemH + ItemGap);
-
-            // Confirming: selected pulses, others fade
-            float itemAlpha = rowAlpha;
-            if (_confirming)
-            {
-                if (selected)
-                {
-                    float pulse = 0.7f + MathF.Sin((float)_time * 12f) * 0.3f;
-                    itemAlpha *= pulse;
-                }
-                else
-                {
-                    itemAlpha *= 1f - _confirmAnim;
-                }
-            }
-
-            // Item background
-            float bgBright = selected ? 0.13f : 0.06f;
-            float bgA = selected ? 0.92f : 0.55f;
-            batch.Draw(px, itemX + slideX, y, itemW, ItemH,
-                bgBright, bgBright, bgBright + 0.02f, bgA * itemAlpha);
-
-            // Left accent bar (per-item colour)
-            if (selected)
-            {
-                float barH = ItemH * EaseOutCubic(MathF.Min(1f, (_selectBounce < 0.5f ? 1f : 1f - _selectBounce)));
-                float barY = y + (ItemH - barH) * 0.5f;
-                batch.Draw(px, itemX + slideX, barY, 4f, barH,
-                    accent[0], accent[1], accent[2], itemAlpha);
-
-                // Faint accent glow behind selected item
-                batch.Draw(px, itemX + slideX, y, itemW, ItemH,
-                    accent[0] * 0.08f, accent[1] * 0.08f, accent[2] * 0.08f, itemAlpha * 0.5f);
-            }
-            else
-            {
-                // Thin subtle bar even when not selected
-                batch.Draw(px, itemX + slideX, y + 6f, 2f, ItemH - 12f,
-                    accent[0] * 0.5f, accent[1] * 0.5f, accent[2] * 0.5f, itemAlpha * 0.35f);
-            }
-
-            // Label — bigger when selected
-            float labelScale = selected ? 1.5f : 1.2f;
-            if (selected && _selectBounce > 0)
-                labelScale += _selectBounce * 0.18f;
-
-            float lr, lg, lb;
-            if (selected)
-            {
-                // Tint label with item accent
-                lr = 0.7f + accent[0] * 0.3f;
-                lg = 0.7f + accent[1] * 0.3f;
-                lb = 0.7f + accent[2] * 0.3f;
-            }
-            else
-            {
-                lr = 0.60f; lg = 0.60f; lb = 0.65f;
-            }
-
-            font.DrawTextShadow(batch, _items[i].Label,
-                itemX + 22 + slideX, y + 10, labelScale,
-                lr, lg, lb, itemAlpha, 2f);
-
-            // Description
-            float descY = y + 12 + font.MeasureHeight(labelScale) + 4;
-            font.DrawText(batch, _items[i].Description,
-                itemX + 22 + slideX, descY, 0.6f,
-                0.42f, 0.42f, 0.48f, itemAlpha * 0.75f);
+            DrawMenuItem(batch, font, i, rowT, layout.X, layout.Y + i * (layout.RowH + layout.Gap),
+                layout.W, layout.RowH, contentA);
         }
 
-        // ── Top bar ──
-        float[] selAccent = _items[_selected].Accent;
-        batch.Draw(px, 0, 0, sw, TopBarH, 0.07f, 0.07f, 0.11f, fadeA);
-        batch.Draw(px, 0, TopBarH - 2, sw, 2,
-            selAccent[0], selAccent[1], selAccent[2], 0.6f * fadeA);
+        DrawAmbientStatus(batch, font, px, sw, sh, contentA, selectedAccent);
+        DrawControlHint(batch, font, sw, sh, contentA);
 
-        font.DrawTextShadow(batch, "TAIKO NOVA", 20, 14, 1.0f,
-            1f, 1f, 1f, fadeA, 2f);
-
-        // ── Now playing (top right) ──
-        if (_nowPlaying != null)
-        {
-            string npText = $"{_nowPlaying.Artist} - {_nowPlaying.Title}";
-            float npScale = 0.55f;
-            float npW = font.MeasureWidth(npText, npScale);
-            float npX = sw - npW - 18;
-            float npY = 16f;
-
-            // Music note icon (just a dot that pulses)
-            float notePulse = 0.5f + MathF.Sin(_npPulse) * 0.15f;
-            float noteX = npX - 14;
-            batch.Draw(Engine.CircleTex, noteX, npY + 2, 8, 8,
-                selAccent[0], selAccent[1], selAccent[2], fadeA * notePulse);
-
-            font.DrawText(batch, npText, npX, npY, npScale,
-                0.55f, 0.55f, 0.60f, fadeA * 0.7f);
-        }
-        else
-        {
-            // Version when no music
-            font.DrawTextRightShadow(batch, "v0.1", sw - 20, 16, 0.7f,
-                0.5f, 0.5f, 0.55f, fadeA * 0.5f);
-        }
-
-        // ── Bottom bar ──
-        float bottomY = sh - BottomBarH;
-        batch.Draw(px, 0, bottomY, sw, BottomBarH, 0.07f, 0.07f, 0.11f, fadeA);
-        batch.Draw(px, 0, bottomY, sw, 1, 0.25f, 0.25f, 0.30f, 0.4f * fadeA);
-
-        float ctrlY = bottomY + 12;
-        float cx = 20;
-        cx = DrawKeyHint(batch, font, px, cx, ctrlY, "UP/DOWN", "Navigate", fadeA);
-        cx = DrawKeyHint(batch, font, px, cx + 16, ctrlY, "ENTER", "Select", fadeA);
-        DrawKeyHint(batch, font, px, cx + 16, ctrlY, "ESC", "Quit", fadeA);
-
-        // ── Confirm overlay (fade to black) ──
         if (_confirmAnim > 0.01f)
-            batch.Draw(px, 0, 0, sw, sh, 0f, 0f, 0f, _confirmAnim * 0.6f);
+            batch.Draw(px, 0, 0, sw, sh, 0f, 0f, 0f, confirmT * 0.68f);
 
         batch.End();
     }
@@ -533,16 +469,173 @@ public class MainMenuScreen : Screen
     //  Helpers
     // ═══════════════════════════════════════════════════════════════════
 
-    private float DrawKeyHint(SpriteBatch batch, Engine.Text.BitmapFont font,
-        Texture2D px, float x, float y, string key, string action, float fadeA)
+    private (float X, float Y, float W, float RowH, float Gap) GetMenuLayout(int sw, int sh)
     {
-        float keyW = font.MeasureWidth(key, 0.6f) + 10;
-        float keyH = 20f;
-        batch.Draw(px, x, y, keyW, keyH, 0.2f, 0.2f, 0.25f, fadeA * 0.9f);
-        font.DrawText(batch, key, x + 5, y + 3, 0.6f, 0.9f, 0.9f, 0.95f, fadeA);
-        float actionX = x + keyW + 6;
-        font.DrawText(batch, action, actionX, y + 3, 0.6f, 0.5f, 0.5f, 0.55f, fadeA * 0.8f);
-        return actionX + font.MeasureWidth(action, 0.6f);
+        float w = MathF.Min(520f, sw * 0.42f);
+        float rowH = 56f;
+        float gap = 16f;
+        float x = MathF.Max(76f, sw * 0.085f);
+        float totalH = _items.Length * rowH + (_items.Length - 1) * gap;
+        float y = MathF.Min(sh - totalH - 150f, 332f);
+        return (x, y, w, rowH, gap);
+    }
+
+    private void DrawMenuItem(SpriteBatch batch, Engine.Text.BitmapFont font,
+        int index, float rowT, float x, float y, float w, float h, float fadeA)
+    {
+        var item = _items[index];
+        bool selected = index == _selected;
+        float[] accent = item.Accent;
+        float reveal = EaseOutCubic(MathF.Min(1f, rowT));
+        float a = fadeA * reveal;
+        float slide = (1f - reveal) * 30f;
+
+        if (_confirming)
+        {
+            if (selected)
+                a *= 0.82f + MathF.Sin((float)_time * 12f) * 0.12f;
+            else
+                a *= 1f - EaseOutCubic(_confirmAnim);
+        }
+
+        if (selected)
+        {
+            DrawRoundedRect(batch, x - 18f + slide, y - 5f, w + 36f, h + 10f, 14f,
+                accent[0], accent[1], accent[2], 0.075f * a);
+            DrawRoundedRect(batch, x - 18f + slide, y + 10f, 3f, h - 20f, 1.5f,
+                accent[0], accent[1], accent[2], 0.88f * a);
+        }
+
+        DrawRoundedRect(batch, x + slide, y + h - 1f, w, 1f, 0.5f,
+            1f, 1f, 1f, (selected ? 0.10f : 0.045f) * a);
+
+        string idx = (index + 1).ToString("00");
+        font.DrawText(batch, idx, x + slide, y + 18f, 0.46f,
+            selected ? accent[0] : 0.34f,
+            selected ? accent[1] : 0.36f,
+            selected ? accent[2] : 0.42f,
+            (selected ? 0.78f : 0.54f) * a);
+
+        float labelScale = selected ? 0.92f + _selectBounce * 0.035f : 0.76f;
+        string label = TruncateToFit(font, item.Label, labelScale, w - 144f);
+        font.DrawText(batch, label, x + 58f + slide, y + (selected ? 9f : 13f), labelScale,
+            selected ? 0.95f : 0.64f,
+            selected ? 0.96f : 0.66f,
+            selected ? 1.00f : 0.72f,
+            a);
+
+        if (selected)
+        {
+            string action = "ENTER";
+            float actionW = font.MeasureWidth(action, 0.40f);
+            font.DrawText(batch, action, x + w - actionW + slide, y + 20f, 0.40f,
+                0.62f, 0.64f, 0.70f, 0.74f * a);
+        }
+    }
+
+    private void DrawAmbientStatus(SpriteBatch batch, Engine.Text.BitmapFont font,
+        Texture2D px, int sw, int sh, float fadeA, float[] accent)
+    {
+        float x = sw - 520f;
+        float y = sh - 126f;
+        float w = 450f;
+
+        DrawRoundedRect(batch, x, y + 28f, w, 1f, 0.5f,
+            1f, 1f, 1f, 0.075f * fadeA);
+
+        string label = _nowPlaying == null ? "READY" : "AMBIENT";
+        font.DrawText(batch, label, x, y, 0.42f,
+            accent[0], accent[1], accent[2], 0.72f * fadeA);
+
+        if (_nowPlaying == null)
+        {
+            string fallback = $"{_beatmaps.Count} maps scanned";
+            font.DrawText(batch, fallback, x, y + 42f, 0.56f,
+                0.56f, 0.58f, 0.64f, 0.72f * fadeA);
+            return;
+        }
+
+        float pulse = 0.55f + MathF.Sin(_npPulse) * 0.16f;
+        batch.Draw(Engine.CircleTex, x, y + 44f, 8f, 8f,
+            accent[0], accent[1], accent[2], pulse * fadeA);
+
+        string title = $"{_nowPlaying.Artist} - {_nowPlaying.Title}";
+        title = TruncateToFit(font, title, 0.54f, w - 24f);
+        font.DrawText(batch, title, x + 20f, y + 40f, 0.54f,
+            0.62f, 0.64f, 0.70f, 0.78f * fadeA);
+    }
+
+    private void DrawControlHint(SpriteBatch batch, Engine.Text.BitmapFont font,
+        int sw, int sh, float fadeA)
+    {
+        string controls = "Up/Down move     Enter select     Esc exit";
+        controls = TruncateToFit(font, controls, 0.42f, sw - 160f);
+        float x = MathF.Max(76f, sw * 0.085f);
+        font.DrawText(batch, controls, x, sh - 52f, 0.42f,
+            0.42f, 0.44f, 0.50f, 0.68f * fadeA);
+    }
+
+    private bool TrySelectItemAt(float mx, float my)
+    {
+        var layout = GetMenuLayout(Engine.ScreenWidth, Engine.ScreenHeight);
+        for (int i = 0; i < _items.Length; i++)
+        {
+            float y = layout.Y + i * (layout.RowH + layout.Gap);
+            if (mx < layout.X - 24f || mx > layout.X + layout.W + 24f) continue;
+            if (my < y - 8f || my > y + layout.RowH + 8f) continue;
+
+            _selected = i;
+            _selectBounce = 1f;
+            return true;
+        }
+
+        return false;
+    }
+
+    private void DrawRoundedRect(SpriteBatch batch, float x, float y, float w, float h,
+        float radius, float r, float g, float b, float a)
+    {
+        if (a <= 0f || w <= 0f || h <= 0f) return;
+
+        radius = MathF.Min(radius, MathF.Min(w, h) * 0.5f);
+        if (radius <= 0.5f)
+        {
+            batch.Draw(Engine.PixelTex, x, y, w, h, r, g, b, a);
+            return;
+        }
+
+        float d = radius * 2f;
+        float midW = MathF.Max(0f, w - d);
+        float midH = MathF.Max(0f, h - d);
+
+        if (midW > 0f)
+            batch.Draw(Engine.PixelTex, x + radius, y, midW, h, r, g, b, a);
+        if (midH > 0f)
+        {
+            batch.Draw(Engine.PixelTex, x, y + radius, radius, midH, r, g, b, a);
+            batch.Draw(Engine.PixelTex, x + w - radius, y + radius, radius, midH, r, g, b, a);
+        }
+
+        batch.Draw(Engine.CircleTex, x, y, d, d, r, g, b, a);
+        batch.Draw(Engine.CircleTex, x + w - d, y, d, d, r, g, b, a);
+        batch.Draw(Engine.CircleTex, x, y + h - d, d, d, r, g, b, a);
+        batch.Draw(Engine.CircleTex, x + w - d, y + h - d, d, d, r, g, b, a);
+    }
+
+    private static string TruncateToFit(Engine.Text.BitmapFont font, string text,
+        float scale, float maxWidth)
+    {
+        if (string.IsNullOrEmpty(text) || font.MeasureWidth(text, scale) <= maxWidth)
+            return text;
+
+        for (int len = text.Length - 1; len > 0; len--)
+        {
+            string truncated = text[..len] + "..";
+            if (font.MeasureWidth(truncated, scale) <= maxWidth)
+                return truncated;
+        }
+
+        return "..";
     }
 
     private static float EaseOutCubic(float t)
