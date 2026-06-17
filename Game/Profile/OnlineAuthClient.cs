@@ -374,6 +374,7 @@ internal static class SteamworksAssemblyResolver
 
         string userNuGet = Environment.GetEnvironmentVariable("NUGET_PACKAGES")
             ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages");
+        yield return Path.Combine(userNuGet, "steamworks.net.anycpu", version, "lib", "net8.0", dll);
         yield return Path.Combine(userNuGet, "steamworks.net", version, "lib", "netstandard2.1", dll);
     }
 }
@@ -489,22 +490,35 @@ internal static class SteamAuthBridge
     private static bool HasSteamNativeLibrary()
     {
         string libraryName = GetSteamNativeLibraryName();
-        string[] paths =
-        {
-            Path.Combine(Environment.CurrentDirectory, libraryName),
-            Path.Combine(AppContext.BaseDirectory, libraryName),
-            Path.Combine(AppContext.BaseDirectory, "runtimes", GetRuntimeNativeFolder(), "native", libraryName)
-        };
-        return paths.Any(File.Exists);
+        return GetSteamNativeLibraryPaths(libraryName).Any(File.Exists);
     }
 
-    private static string GetRuntimeNativeFolder()
+    private static IEnumerable<string> GetSteamNativeLibraryPaths(string libraryName)
+    {
+        yield return Path.Combine(Environment.CurrentDirectory, libraryName);
+        yield return Path.Combine(AppContext.BaseDirectory, libraryName);
+
+        foreach (string folder in GetRuntimeNativeFolders())
+            yield return Path.Combine(AppContext.BaseDirectory, "runtimes", folder, "native", libraryName);
+    }
+
+    private static IEnumerable<string> GetRuntimeNativeFolders()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            return Environment.Is64BitProcess ? "win-x64" : "win-x86";
+        {
+            yield return Environment.Is64BitProcess ? "win-x64" : "win-x86";
+            yield break;
+        }
+
         if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-            return "osx";
-        return Environment.Is64BitProcess ? "linux-x64" : "linux-x86";
+        {
+            yield return RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? "osx-arm64" : "osx-x64";
+            yield return "osx";
+            yield break;
+        }
+
+        yield return RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? "linux-arm64" : "linux-x64";
+        yield return Environment.Is64BitProcess ? "linux-x64" : "linux-x86";
     }
 
     private static string GetSteamNativeLibraryName()
