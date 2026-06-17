@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -328,11 +329,18 @@ internal static class SteamAuthBridge
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(
             cancellationToken, timeout.Token);
 
-        while (!_pendingTicket.Task.IsCompleted)
+        try
         {
-            linked.Token.ThrowIfCancellationRequested();
-            SteamAPI.RunCallbacks();
-            await Task.Delay(50, linked.Token);
+            while (!_pendingTicket.Task.IsCompleted)
+            {
+                linked.Token.ThrowIfCancellationRequested();
+                SteamAPI.RunCallbacks();
+                await Task.Delay(50, linked.Token);
+            }
+        }
+        catch (OperationCanceledException ex)
+        {
+            throw new SteamUnavailableException("Steam ticket request timed out.", ex);
         }
 
         var response = await _pendingTicket.Task;
@@ -358,18 +366,75 @@ internal static class SteamAuthBridge
 
         try
         {
+            ValidateLocalSteamRuntime();
             if (!SteamAPI.Init())
-                throw new SteamUnavailableException("Steam services are unavailable.");
+            {
+                throw new SteamUnavailableException(
+                    "Steam is not available. Make sure Steam is running, you are logged in, and steam_appid.txt matches the backend Steam App ID.");
+            }
             _initialized = true;
         }
         catch (DllNotFoundException ex)
         {
-            throw new SteamUnavailableException("Steam services are unavailable.", ex);
+            throw new SteamUnavailableException($"Missing Steamworks native library: {GetSteamNativeLibraryName()}.", ex);
         }
         catch (Exception ex) when (ex is not SteamUnavailableException)
         {
             throw new SteamUnavailableException("Steam services are unavailable.", ex);
         }
+    }
+
+    private static void ValidateLocalSteamRuntime()
+    {
+        if (!HasSteamAppIdFile() && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("SteamAppId"))
+            && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("SteamGameId")))
+        {
+            throw new SteamUnavailableException(
+                "Missing steam_appid.txt. Put your Steam App ID in steam_appid.txt next to the game or run through Steam.");
+        }
+
+        if (!HasSteamNativeLibrary())
+            throw new SteamUnavailableException($"Missing Steamworks native library: {GetSteamNativeLibraryName()}.");
+    }
+
+    private static bool HasSteamAppIdFile()
+    {
+        string[] paths =
+        {
+            Path.Combine(Environment.CurrentDirectory, "steam_appid.txt"),
+            Path.Combine(AppContext.BaseDirectory, "steam_appid.txt")
+        };
+        return paths.Any(File.Exists);
+    }
+
+    private static bool HasSteamNativeLibrary()
+    {
+        string libraryName = GetSteamNativeLibraryName();
+        string[] paths =
+        {
+            Path.Combine(Environment.CurrentDirectory, libraryName),
+            Path.Combine(AppContext.BaseDirectory, libraryName),
+            Path.Combine(AppContext.BaseDirectory, "runtimes", GetRuntimeNativeFolder(), "native", libraryName)
+        };
+        return paths.Any(File.Exists);
+    }
+
+    private static string GetRuntimeNativeFolder()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return Environment.Is64BitProcess ? "win-x64" : "win-x86";
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            return "osx";
+        return Environment.Is64BitProcess ? "linux-x64" : "linux-x86";
+    }
+
+    private static string GetSteamNativeLibraryName()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return Environment.Is64BitProcess ? "steam_api64.dll" : "steam_api.dll";
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            return "libsteam_api.dylib";
+        return "libsteam_api.so";
     }
 
     private static void OnWebTicket(GetTicketForWebApiResponse_t response)

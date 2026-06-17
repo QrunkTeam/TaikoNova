@@ -482,9 +482,9 @@ public sealed class ProfileSelectScreen : Screen
             var profile = Game.Profiles.CreateOrUpdateOnlineProfile(login);
             Game.LoginProfile(profile);
         }
-        catch (SteamUnavailableException)
+        catch (SteamUnavailableException ex)
         {
-            _status = "Steam services are unavailable";
+            _status = ex.Message;
             _statusFlash = 1f;
             Game.Notifications.Show("Steam", _status, r: 0.85f, g: 0.32f, b: 0.26f);
         }
