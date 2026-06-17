@@ -44,6 +44,7 @@ public sealed class ProfileSelectScreen : Screen
     private float _optionSelectFlash;
     private Task<OnlineAuthResult>? _onlineAuthTask;
     private bool _onlineAuthBusy;
+    private string _onlineAuthProvider = "";
     private double _nextTrackCheck;
 
     private const float RowH = 76f;
@@ -461,14 +462,25 @@ public sealed class ProfileSelectScreen : Screen
             return;
 
         _onlineAuthBusy = true;
+        _onlineAuthProvider = provider;
         _status = provider == "discord"
             ? "Waiting for Discord login..."
             : "Checking Steam services...";
         _statusFlash = 1f;
 
-        _onlineAuthTask = provider == "discord"
-            ? OnlineAuthClient.LoginWithDiscordAsync()
-            : OnlineAuthClient.LoginWithSteamAsync();
+        try
+        {
+            _onlineAuthTask = provider == "discord"
+                ? OnlineAuthClient.LoginWithDiscordAsync()
+                : OnlineAuthClient.LoginWithSteamAsync();
+        }
+        catch (Exception ex)
+        {
+            ShowOnlineAuthError(provider, ex);
+            _onlineAuthTask = null;
+            _onlineAuthBusy = false;
+            _onlineAuthProvider = "";
+        }
     }
 
     private bool CompleteOnlineAuthIfReady()
@@ -484,23 +496,39 @@ public sealed class ProfileSelectScreen : Screen
         }
         catch (SteamUnavailableException ex)
         {
-            _status = ex.Message;
-            _statusFlash = 1f;
-            Game.Notifications.Show("Steam", _status, r: 0.85f, g: 0.32f, b: 0.26f);
+            ShowOnlineAuthError("steam", ex);
+        }
+        catch (Exception ex) when (_onlineAuthProvider == "steam"
+            && SteamworksAssemblyResolver.IsSteamworksAssemblyFailure(ex))
+        {
+            ShowOnlineAuthError("steam", ex);
         }
         catch (Exception ex)
         {
-            _status = ex.Message;
-            _statusFlash = 1f;
-            Game.Notifications.Show("Online", _status, r: 0.85f, g: 0.32f, b: 0.26f);
+            ShowOnlineAuthError(_onlineAuthProvider, ex);
         }
         finally
         {
             _onlineAuthTask = null;
             _onlineAuthBusy = false;
+            _onlineAuthProvider = "";
         }
 
         return true;
+    }
+
+    private void ShowOnlineAuthError(string provider, Exception ex)
+    {
+        bool steamDependencyFailure = provider == "steam"
+            && SteamworksAssemblyResolver.IsSteamworksAssemblyFailure(ex);
+        string message = steamDependencyFailure
+            ? "Steamworks.NET is missing. Rebuild TaikoNova, then launch the rebuilt game."
+            : ex.Message;
+
+        _status = message;
+        _statusFlash = 1f;
+        Game.Notifications.Show(provider == "steam" ? "Steam" : "Online",
+            message, r: 0.85f, g: 0.32f, b: 0.26f);
     }
 
     private void UpdateLocalName()
@@ -726,7 +754,8 @@ public sealed class ProfileSelectScreen : Screen
         if (_status.Length > 0)
         {
             float a = (0.52f + _statusFlash * 0.36f) * baseAlpha;
-            font.DrawText(batch, _status, x + 2f,
+            string fittedStatus = TruncateToFit(font, _status, 0.44f, layout.Width - 8f);
+            font.DrawText(batch, fittedStatus, x + 2f,
                 layout.Y + labels.Length * (RowH + RowGap) + 18f, 0.44f,
                 0.82f, 0.62f, 0.68f, a);
         }
@@ -839,7 +868,8 @@ public sealed class ProfileSelectScreen : Screen
         if (_status.Length > 0)
         {
             float a = (0.52f + _statusFlash * 0.36f) * reveal;
-            font.DrawText(batch, _status, x + 2f,
+            string fittedStatus = TruncateToFit(font, _status, 0.44f, layout.Width - 8f);
+            font.DrawText(batch, fittedStatus, x + 2f,
                 layout.Y + labels.Length * (RowH + RowGap) + 18f, 0.44f,
                 0.82f, 0.62f, 0.68f, a);
         }

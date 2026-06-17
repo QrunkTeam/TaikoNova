@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Net;
+using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Runtime.Loader;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -23,6 +25,11 @@ public sealed class SteamUnavailableException : OnlineAuthException
 public static class OnlineAuthClient
 {
     public const string DiscordRedirectUri = "http://127.0.0.1:49457/auth/discord/callback/";
+
+    static OnlineAuthClient()
+    {
+        SteamworksAssemblyResolver.Register();
+    }
 
     private static readonly HttpClient Http = new()
     {
@@ -134,7 +141,19 @@ public static class OnlineAuthClient
 
     public static async Task<OnlineAuthResult> LoginWithSteamAsync(CancellationToken cancellationToken = default)
     {
-        var ticket = await SteamAuthBridge.GetWebApiTicketAsync(SteamWebApiIdentity, cancellationToken);
+        SteamworksAssemblyResolver.Register();
+
+        SteamTicketData ticket;
+        try
+        {
+            ticket = await SteamAuthBridge.GetWebApiTicketAsync(SteamWebApiIdentity, cancellationToken);
+        }
+        catch (Exception ex) when (SteamworksAssemblyResolver.IsSteamworksAssemblyFailure(ex))
+        {
+            throw new SteamUnavailableException(
+                "Steamworks.NET is missing. Run dotnet restore/build, then launch TaikoNova from the rebuilt output.", ex);
+        }
+
         var exchange = new SteamExchangeRequest
         {
             TicketBase64 = Convert.ToBase64String(ticket.Ticket),
@@ -296,6 +315,66 @@ public static class OnlineAuthClient
     {
         [JsonPropertyName("error")]
         public string Error { get; set; } = "";
+    }
+}
+
+internal static class SteamworksAssemblyResolver
+{
+    private static bool _registered;
+
+    public static void Register()
+    {
+        if (_registered)
+            return;
+
+        AssemblyLoadContext.Default.Resolving += Resolve;
+        _registered = true;
+    }
+
+    public static bool IsSteamworksAssemblyFailure(Exception exception)
+    {
+        for (Exception? ex = exception; ex != null; ex = ex.InnerException)
+        {
+            if (ex is FileNotFoundException or FileLoadException or BadImageFormatException)
+            {
+                string message = ex.Message;
+                if (message.Contains("Steamworks.NET", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static Assembly? Resolve(AssemblyLoadContext context, AssemblyName assemblyName)
+    {
+        if (!string.Equals(assemblyName.Name, "Steamworks.NET", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        foreach (string path in GetCandidatePaths(assemblyName))
+        {
+            if (File.Exists(path))
+                return context.LoadFromAssemblyPath(path);
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<string> GetCandidatePaths(AssemblyName assemblyName)
+    {
+        string dll = "Steamworks.NET.dll";
+        string baseDir = AppContext.BaseDirectory;
+
+        yield return Path.Combine(baseDir, dll);
+        yield return Path.Combine(Environment.CurrentDirectory, dll);
+
+        string version = assemblyName.Version == null
+            ? "2024.8.0"
+            : $"{assemblyName.Version.Major}.{assemblyName.Version.Minor}.{assemblyName.Version.Build}";
+
+        string userNuGet = Environment.GetEnvironmentVariable("NUGET_PACKAGES")
+            ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages");
+        yield return Path.Combine(userNuGet, "steamworks.net", version, "lib", "netstandard2.1", dll);
     }
 }
 
