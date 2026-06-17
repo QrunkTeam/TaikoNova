@@ -14,6 +14,7 @@ public sealed class ProfileSelectScreen : Screen
     {
         Browse,
         AddOptions,
+        OnlineProviders,
         LocalName
     }
 
@@ -37,6 +38,12 @@ public sealed class ProfileSelectScreen : Screen
     private float _lastShapedMusicEnergy;
     private float _audioFlow;
     private float _beatPulse;
+    private float _submenuReveal;
+    private float _creatorReveal;
+    private float _submenuFlash;
+    private float _optionSelectFlash;
+    private Task<OnlineAuthResult>? _onlineAuthTask;
+    private bool _onlineAuthBusy;
     private double _nextTrackCheck;
 
     private const float RowH = 76f;
@@ -74,6 +81,12 @@ public sealed class ProfileSelectScreen : Screen
         _lastShapedMusicEnergy = 0f;
         _audioFlow = 0f;
         _beatPulse = 0f;
+        _submenuReveal = 0f;
+        _creatorReveal = 0f;
+        _submenuFlash = 0f;
+        _optionSelectFlash = 0f;
+        _onlineAuthTask = null;
+        _onlineAuthBusy = false;
         _nextTrackCheck = 0;
 
         StartProfileAudio();
@@ -90,8 +103,15 @@ public sealed class ProfileSelectScreen : Screen
     public override void Update(double deltaTime)
     {
         _time += deltaTime;
-        _statusFlash = MathF.Max(0f, _statusFlash - (float)deltaTime * 2.4f);
+        float fdt = (float)deltaTime;
+        _statusFlash = MathF.Max(0f, _statusFlash - fdt * 2.4f);
+        _submenuReveal = Lerp(_submenuReveal, _mode == ProfileMode.Browse ? 0f : 1f, fdt * 9.5f);
+        _creatorReveal = Lerp(_creatorReveal, _mode == ProfileMode.LocalName ? 1f : 0f, fdt * 10f);
+        _submenuFlash = MathF.Max(0f, _submenuFlash - fdt * 2.8f);
+        _optionSelectFlash = MathF.Max(0f, _optionSelectFlash - fdt * 4.2f);
         UpdateProfileAudio(deltaTime);
+        if (CompleteOnlineAuthIfReady())
+            return;
 
         switch (_mode)
         {
@@ -100,6 +120,9 @@ public sealed class ProfileSelectScreen : Screen
                 break;
             case ProfileMode.AddOptions:
                 UpdateAddOptions();
+                break;
+            case ProfileMode.OnlineProviders:
+                UpdateOnlineProviders();
                 break;
             case ProfileMode.LocalName:
                 UpdateLocalName();
@@ -308,7 +331,11 @@ public sealed class ProfileSelectScreen : Screen
         {
             _mode = ProfileMode.AddOptions;
             _selected = 1;
+            _targetScroll = 0f;
+            _scrollOffset = 0f;
             _status = "";
+            _submenuFlash = 1f;
+            _optionSelectFlash = 1f;
             return;
         }
 
@@ -327,13 +354,21 @@ public sealed class ProfileSelectScreen : Screen
             return;
         }
 
+        int previous = _selected;
+
         if (input.IsPressed(Keys.Up))
             _selected = (_selected + 2) % 3;
         if (input.IsPressed(Keys.Down))
             _selected = (_selected + 1) % 3;
 
+        if (_selected != previous)
+            _optionSelectFlash = 1f;
+
         if (input.MousePressed && TrySelectOptionAt(input.MouseX, input.MouseY, 3))
+        {
+            _optionSelectFlash = 1f;
             ActivateAddOption();
+        }
 
         if (input.IsPressed(Keys.Enter) || input.IsPressed(Keys.Space))
             ActivateAddOption();
@@ -344,19 +379,128 @@ public sealed class ProfileSelectScreen : Screen
         switch (_selected)
         {
             case 0:
-                _status = "Online accounts are coming later";
-                _statusFlash = 1f;
+                _mode = ProfileMode.OnlineProviders;
+                _selected = 0;
+                _status = "";
+                _submenuFlash = 1f;
+                _optionSelectFlash = 1f;
                 break;
             case 1:
                 _mode = ProfileMode.LocalName;
                 _localName = "";
                 _previewSeed = Random.Shared.Next();
                 _status = "";
+                _creatorReveal = 0f;
+                _submenuFlash = 1f;
                 break;
             case 2:
                 ReturnToBrowse();
                 break;
         }
+    }
+
+    private void UpdateOnlineProviders()
+    {
+        var input = Engine.Input;
+
+        if (input.IsPressed(Keys.Escape))
+        {
+            _mode = ProfileMode.AddOptions;
+            _selected = 0;
+            _submenuFlash = 0.75f;
+            _optionSelectFlash = 1f;
+            return;
+        }
+
+        if (_onlineAuthBusy)
+            return;
+
+        int previous = _selected;
+
+        if (input.IsPressed(Keys.Up))
+            _selected = (_selected + 2) % 3;
+        if (input.IsPressed(Keys.Down))
+            _selected = (_selected + 1) % 3;
+
+        if (_selected != previous)
+            _optionSelectFlash = 1f;
+
+        if (input.MousePressed && TrySelectOptionAt(input.MouseX, input.MouseY, 3))
+        {
+            _optionSelectFlash = 1f;
+            ActivateOnlineProvider();
+        }
+
+        if (input.IsPressed(Keys.Enter) || input.IsPressed(Keys.Space))
+            ActivateOnlineProvider();
+    }
+
+    private void ActivateOnlineProvider()
+    {
+        switch (_selected)
+        {
+            case 0:
+                StartOnlineLogin("discord");
+                break;
+            case 1:
+                StartOnlineLogin("steam");
+                break;
+            case 2:
+                _mode = ProfileMode.AddOptions;
+                _selected = 0;
+                _status = "";
+                _submenuFlash = 0.75f;
+                _optionSelectFlash = 1f;
+                break;
+        }
+    }
+
+    private void StartOnlineLogin(string provider)
+    {
+        if (_onlineAuthBusy)
+            return;
+
+        _onlineAuthBusy = true;
+        _status = provider == "discord"
+            ? "Waiting for Discord login..."
+            : "Checking Steam services...";
+        _statusFlash = 1f;
+
+        _onlineAuthTask = provider == "discord"
+            ? OnlineAuthClient.LoginWithDiscordAsync()
+            : OnlineAuthClient.LoginWithSteamAsync();
+    }
+
+    private bool CompleteOnlineAuthIfReady()
+    {
+        if (_onlineAuthTask == null || !_onlineAuthTask.IsCompleted)
+            return false;
+
+        try
+        {
+            var login = _onlineAuthTask.GetAwaiter().GetResult();
+            var profile = Game.Profiles.CreateOrUpdateOnlineProfile(login);
+            Game.LoginProfile(profile);
+        }
+        catch (SteamUnavailableException)
+        {
+            _status = "Steam services are unavailable";
+            _statusFlash = 1f;
+            Game.Notifications.Show("Steam", _status, r: 0.85f, g: 0.32f, b: 0.26f);
+        }
+        catch (Exception ex)
+        {
+            _status = ex.Message;
+            _statusFlash = 1f;
+            Game.Notifications.Show("Online", _status, r: 0.85f, g: 0.32f, b: 0.26f);
+        }
+        finally
+        {
+            _onlineAuthTask = null;
+            _onlineAuthBusy = false;
+        }
+
+        return true;
     }
 
     private void UpdateLocalName()
@@ -367,6 +511,8 @@ public sealed class ProfileSelectScreen : Screen
         {
             _mode = ProfileMode.AddOptions;
             _selected = 1;
+            _submenuFlash = 0.75f;
+            _optionSelectFlash = 1f;
             return;
         }
 
@@ -416,9 +562,15 @@ public sealed class ProfileSelectScreen : Screen
                 DrawProfileList(batch, font, px, sw, sh);
                 break;
             case ProfileMode.AddOptions:
+                DrawProfileList(batch, font, px, sw, sh, 0);
                 DrawAddOptions(batch, font, px, sw, sh);
                 break;
+            case ProfileMode.OnlineProviders:
+                DrawProfileList(batch, font, px, sw, sh, 0);
+                DrawOnlineProviders(batch, font, px, sw, sh);
+                break;
             case ProfileMode.LocalName:
+                DrawProfileList(batch, font, px, sw, sh, 0);
                 DrawLocalCreator(batch, font, px, sw, sh);
                 break;
         }
@@ -438,22 +590,24 @@ public sealed class ProfileSelectScreen : Screen
     }
 
     private void DrawProfileList(SpriteBatch batch, BitmapFont font,
-        Texture2D px, int sw, int sh)
+        Texture2D px, int sw, int sh, int selectedOverride = -1)
     {
         var layout = GetListLayout(sw, sh);
         int count = Game.Profiles.Profiles.Count + 1;
+        int selectedIndex = selectedOverride >= 0 ? selectedOverride : _selected;
 
         for (int i = 0; i < count; i++)
         {
             float y = layout.Y + i * (RowH + RowGap) - _scrollOffset;
             if (y + RowH < layout.Y || y > layout.Y + layout.Height) continue;
 
-            bool selected = i == _selected;
+            bool selected = i == selectedIndex;
+            float rowX = layout.X;
             if (i == 0)
-                DrawAddProfileRow(batch, font, px, layout.X, y, layout.Width, selected);
+                DrawAddProfileRow(batch, font, px, rowX, y, layout.Width, selected);
             else
                 DrawProfileRow(batch, font, px, Game.Profiles.Profiles[i - 1],
-                    layout.X, y, layout.Width, selected);
+                    rowX, y, layout.Width, selected);
         }
 
         DrawScrollMarker(batch, px, layout, count);
@@ -524,6 +678,16 @@ public sealed class ProfileSelectScreen : Screen
     private void DrawAddOptions(SpriteBatch batch, BitmapFont font,
         Texture2D px, int sw, int sh)
     {
+        DrawAddOptionsFlyout(batch, font, px, sw, sh, 1f, 0f);
+    }
+
+    private void DrawAddOptionsFlyout(SpriteBatch batch, BitmapFont font,
+        Texture2D px, int sw, int sh, float alphaMultiplier, float extraSlideX)
+    {
+        float reveal = SmoothStep(_submenuReveal);
+        float baseAlpha = reveal * Clamp01(alphaMultiplier);
+        if (baseAlpha <= 0.01f) return;
+
         var layout = GetOptionLayout(sw, sh);
         string[] labels = { "Online account", "Local account", "Back" };
         string[] details =
@@ -532,30 +696,37 @@ public sealed class ProfileSelectScreen : Screen
             "Name plus generated local avatar",
             "Return to profile list"
         };
+        string[] values = { "Soon", "Create", "Back" };
 
-        DrawPanelTitle(batch, font, layout.X, layout.Y - 76f,
-            "Add profile", "Local accounts are available now");
+        float slide = (1f - EaseOutCubic(_submenuReveal)) * -58f + extraSlideX;
+        float x = layout.X + slide;
+        float menuH = labels.Length * (RowH + RowGap) - RowGap;
+
+        DrawSideMenuFrame(batch, font, px, x, layout.Y, layout.Width, menuH,
+            "Add profile", "Local accounts are available now", SkinConfig.Accent, baseAlpha);
 
         for (int i = 0; i < labels.Length; i++)
         {
+            float rowReveal = SmoothStep(Clamp01((_submenuReveal - i * 0.075f) / 0.72f));
+            float rowAlpha = baseAlpha * rowReveal;
+            if (rowAlpha <= 0.01f) continue;
+
             float y = layout.Y + i * (RowH + RowGap);
+            float rowSlide = (1f - rowReveal) * -30f;
             bool selected = i == _selected;
             float[] accent = i == 0
                 ? new[] { 0.44f, 0.62f, 1.00f }
                 : (i == 1 ? SkinConfig.Accent : new[] { 0.58f, 0.60f, 0.68f });
 
-            DrawProfileRowShell(batch, px, layout.X, y, layout.Width, selected, accent);
-            DrawOptionGlyph(batch, px, layout.X + 42f, y + RowH * 0.5f, i, accent, selected ? 0.92f : 0.66f);
-            font.DrawText(batch, labels[i], layout.X + 86f, y + 18f, selected ? 0.68f : 0.58f,
-                0.92f, 0.94f, 1f, selected ? 0.98f : 0.80f);
-            font.DrawText(batch, details[i], layout.X + 86f, y + 47f, 0.39f,
-                0.48f, 0.50f, 0.58f, 0.72f);
+            int glyph = i == 0 ? 3 : (i == 1 ? 4 : 2);
+            DrawXmbOptionRow(batch, font, px, x + rowSlide, y, layout.Width, glyph,
+                labels[i], details[i], values[i], accent, selected, rowAlpha);
         }
 
         if (_status.Length > 0)
         {
-            float a = 0.52f + _statusFlash * 0.36f;
-            font.DrawText(batch, _status, layout.X + 2f,
+            float a = (0.52f + _statusFlash * 0.36f) * baseAlpha;
+            font.DrawText(batch, _status, x + 2f,
                 layout.Y + labels.Length * (RowH + RowGap) + 18f, 0.44f,
                 0.82f, 0.62f, 0.68f, a);
         }
@@ -564,21 +735,32 @@ public sealed class ProfileSelectScreen : Screen
     private void DrawLocalCreator(SpriteBatch batch, BitmapFont font,
         Texture2D px, int sw, int sh)
     {
+        float optionsFade = Clamp01(1f - SmoothStep(_creatorReveal));
+        DrawAddOptionsFlyout(batch, font, px, sw, sh, optionsFade, -28f * EaseOutCubic(_creatorReveal));
+
+        float reveal = SmoothStep(_creatorReveal) * SmoothStep(_submenuReveal);
+        if (reveal <= 0.01f) return;
+
         var layout = GetOptionLayout(sw, sh);
-        DrawPanelTitle(batch, font, layout.X, layout.Y - 76f,
-            "Local account", "Nothing is uploaded");
+        float slide = (1f - EaseOutCubic(_creatorReveal)) * 58f;
+        float x = layout.X + slide;
+        float alpha = reveal;
+        float panelH = 198f;
+
+        DrawSideMenuFrame(batch, font, px, x, layout.Y, layout.Width, panelH,
+            "Local account", "Nothing is uploaded", SkinConfig.Accent, alpha);
 
         float pfpSize = 116f;
         ProfileAvatarRenderer.Draw(batch, px, Engine.CircleTex,
             new PlayerProfile { Name = _localName, AvatarSeed = _previewSeed },
-            layout.X, layout.Y + 10f, pfpSize, 1f);
+            x, layout.Y + 10f, pfpSize, alpha);
 
-        float inputX = layout.X + pfpSize + 34f;
+        float inputX = x + pfpSize + 34f;
         float inputW = layout.Width - pfpSize - 34f;
-        DrawRoundedRect(batch, px, inputX, layout.Y + 18f, inputW, 52f, 12f,
-            0.040f, 0.043f, 0.058f, 0.86f);
+        DrawRoundedRect(batch, px, inputX, layout.Y + 18f, inputW, 52f, 8f,
+            0.040f, 0.043f, 0.058f, 0.86f * alpha);
         DrawRoundedRect(batch, px, inputX + 14f, layout.Y + 66f, inputW - 28f, 2f, 1f,
-            SkinConfig.Accent[0], SkinConfig.Accent[1], SkinConfig.Accent[2], 0.52f);
+            SkinConfig.Accent[0], SkinConfig.Accent[1], SkinConfig.Accent[2], 0.52f * alpha);
 
         string display = _localName.Length == 0 ? "Profile name" : _localName;
         display = TruncateToFit(font, display, 0.62f, inputW - 36f);
@@ -586,35 +768,149 @@ public sealed class ProfileSelectScreen : Screen
             _localName.Length == 0 ? 0.42f : 0.92f,
             _localName.Length == 0 ? 0.44f : 0.94f,
             _localName.Length == 0 ? 0.52f : 1.00f,
-            0.92f);
+            0.92f * alpha);
 
-        if (((int)(_time * 2.0) & 1) == 0)
+        if (((int)(_time * 2.0) & 1) == 0 && alpha > 0.72f)
         {
             float cursorX = inputX + 20f + font.MeasureWidth(display, 0.62f);
             batch.Draw(px, cursorX, layout.Y + 33f, 2f, 22f,
-                1f, 1f, 1f, 0.56f);
+                1f, 1f, 1f, 0.56f * alpha);
         }
 
         var button = GetCreateButtonRect();
+        button = (x + button.X - layout.X, button.Y, button.W, button.H);
         bool hover = IsInside(Engine.Input.MouseX, Engine.Input.MouseY, button);
-        DrawRoundedRect(batch, px, button.X, button.Y, button.W, button.H, 12f,
+        DrawRoundedRect(batch, px, button.X, button.Y, button.W, button.H, 8f,
             SkinConfig.Accent[0] * 0.16f, SkinConfig.Accent[1] * 0.16f,
-            SkinConfig.Accent[2] * 0.16f, hover ? 0.92f : 0.74f);
+            SkinConfig.Accent[2] * 0.16f, (hover ? 0.92f : 0.74f) * alpha);
         font.DrawCentered(batch, "Create local profile",
             button.X + button.W * 0.5f, button.Y + button.H * 0.5f, 0.48f,
-            0.90f, 0.94f, 1f, 0.94f);
+            0.90f, 0.94f, 1f, 0.94f * alpha);
 
         font.DrawText(batch, "F2 randomizes the avatar", inputX + 2f, layout.Y + 92f, 0.38f,
-            0.46f, 0.48f, 0.56f, 0.72f);
+            0.46f, 0.48f, 0.56f, 0.72f * alpha);
     }
 
-    private void DrawPanelTitle(SpriteBatch batch, BitmapFont font,
-        float x, float y, string title, string subtitle)
+    private void DrawOnlineProviders(SpriteBatch batch, BitmapFont font,
+        Texture2D px, int sw, int sh)
     {
-        font.DrawText(batch, title, x, y, 0.84f,
-            0.92f, 0.94f, 1f, 0.96f);
-        font.DrawText(batch, subtitle, x + 2f, y + 36f, 0.44f,
-            0.52f, 0.54f, 0.62f, 0.78f);
+        float reveal = SmoothStep(_submenuReveal);
+        if (reveal <= 0.01f) return;
+
+        var layout = GetOptionLayout(sw, sh);
+        string[] labels = { "Discord", "Steam", "Back" };
+        string[] details =
+        {
+            "Browser login with Discord",
+            "Use your running Steam client",
+            "Return to account type"
+        };
+        string[] values = { "OAuth", "Steamworks", "Back" };
+
+        float slide = (1f - EaseOutCubic(_submenuReveal)) * -58f;
+        float x = layout.X + slide;
+        float menuH = labels.Length * (RowH + RowGap) - RowGap;
+
+        DrawSideMenuFrame(batch, font, px, x, layout.Y, layout.Width, menuH,
+            "Online account", _onlineAuthBusy ? "Authentication in progress" : "Choose a sign-in provider",
+            SkinConfig.Accent, reveal);
+
+        for (int i = 0; i < labels.Length; i++)
+        {
+            float rowReveal = SmoothStep(Clamp01((_submenuReveal - i * 0.075f) / 0.72f));
+            float rowAlpha = reveal * rowReveal;
+            if (rowAlpha <= 0.01f) continue;
+
+            float y = layout.Y + i * (RowH + RowGap);
+            float rowSlide = (1f - rowReveal) * -30f;
+            bool selected = i == _selected;
+            float[] accent = i switch
+            {
+                0 => new[] { 0.48f, 0.57f, 1.00f },
+                1 => new[] { 0.48f, 0.74f, 0.92f },
+                _ => new[] { 0.58f, 0.60f, 0.68f }
+            };
+
+            int glyph = i == 0 ? 3 : (i == 1 ? 4 : 2);
+            DrawXmbOptionRow(batch, font, px, x + rowSlide, y, layout.Width, glyph,
+                labels[i], details[i], values[i], accent, selected, rowAlpha);
+        }
+
+        if (_status.Length > 0)
+        {
+            float a = (0.52f + _statusFlash * 0.36f) * reveal;
+            font.DrawText(batch, _status, x + 2f,
+                layout.Y + labels.Length * (RowH + RowGap) + 18f, 0.44f,
+                0.82f, 0.62f, 0.68f, a);
+        }
+    }
+
+    private void DrawSideMenuFrame(SpriteBatch batch, BitmapFont font, Texture2D px,
+        float x, float y, float w, float h, string title, string subtitle, float[] accent, float alpha)
+    {
+        alpha = Clamp01(alpha);
+        if (alpha <= 0f) return;
+
+        DrawRoundedRect(batch, px, x - 14f, y - 48f, 3f, h + 68f, 1.5f,
+            accent[0], accent[1], accent[2], 0.24f * alpha);
+
+        font.DrawText(batch, title, x, y - 46f, 0.58f,
+            0.92f, 0.94f, 1f, 0.88f * alpha);
+        font.DrawText(batch, subtitle, x + 1f, y - 20f, 0.36f,
+            0.52f, 0.54f, 0.62f, 0.68f * alpha);
+    }
+
+    private void DrawXmbOptionRow(SpriteBatch batch, BitmapFont font, Texture2D px,
+        float x, float y, float w, int kind, string label, string detail, string value,
+        float[] accent, bool selected, float alpha)
+    {
+        alpha = Clamp01(alpha);
+        if (alpha <= 0f) return;
+
+        float selectPulse = selected ? EaseOutCubic(_optionSelectFlash) : 0f;
+        float entryPulse = selected ? EaseOutCubic(_submenuFlash) : 0f;
+        float rowY = y - selectPulse * 2f;
+
+        if (selected)
+        {
+            DrawRoundedRect(batch, px, x - 6f, rowY - 4f, w + 12f, RowH + 8f, 8f,
+                accent[0], accent[1], accent[2], (0.10f + selectPulse * 0.07f + entryPulse * 0.04f) * alpha);
+            DrawRoundedRect(batch, px, x, rowY, w, RowH, 8f,
+                0.052f, 0.058f, 0.078f, 0.70f * alpha);
+        }
+        else
+        {
+            DrawRoundedRect(batch, px, x, rowY, w, RowH, 8f,
+                0.024f, 0.028f, 0.040f, 0.26f * alpha);
+        }
+
+        DrawRoundedRect(batch, px, x + 18f, rowY + RowH - 5f, w - 36f, 1f, 0.5f,
+            1f, 1f, 1f, (selected ? 0.13f : 0.050f) * alpha);
+        DrawRoundedRect(batch, px, x + 8f, rowY + 12f, 4f, RowH - 24f, 2f,
+            accent[0], accent[1], accent[2], (selected ? 0.82f : 0.34f) * alpha);
+
+        DrawOptionGlyph(batch, px, x + 42f, rowY + RowH * 0.5f, kind, accent,
+            (selected ? 0.95f : 0.62f) * alpha);
+
+        float labelScale = selected ? 0.66f : 0.57f;
+        string fittedLabel = TruncateToFit(font, label, labelScale, MathF.Max(110f, w - 210f));
+        font.DrawText(batch, fittedLabel, x + 86f, rowY + 18f, labelScale,
+            selected ? 0.96f : 0.74f,
+            selected ? 0.98f : 0.76f,
+            selected ? 1.00f : 0.84f,
+            (selected ? 0.98f : 0.80f) * alpha);
+
+        string fittedDetail = TruncateToFit(font, detail, 0.37f, MathF.Max(120f, w - 176f));
+        font.DrawText(batch, fittedDetail, x + 86f, rowY + 48f, 0.37f,
+            0.48f, 0.50f, 0.58f, 0.70f * alpha);
+
+        float valueScale = selected ? 0.42f : 0.37f;
+        string fittedValue = TruncateToFit(font, value, valueScale, 86f);
+        font.DrawTextRight(batch, fittedValue, x + w - 18f, rowY + 30f, valueScale,
+            selected ? 0.90f : 0.56f,
+            selected ? 0.92f : 0.58f,
+            selected ? 1.00f : 0.66f,
+            (selected ? 0.92f : 0.58f) * alpha);
     }
 
     private void DrawOptionGlyph(SpriteBatch batch, Texture2D px,
@@ -625,25 +921,102 @@ public sealed class ProfileSelectScreen : Screen
 
         if (kind == 0)
         {
-            batch.Draw(Engine.CircleTex, cx - 10f, cy - 10f, 20f, 20f,
-                accent[0], accent[1], accent[2], alpha);
-            batch.Draw(Engine.CircleTex, cx - 5f, cy - 5f, 10f, 10f,
-                0.018f, 0.020f, 0.028f, 0.95f);
+            DrawGlobeGlyph(batch, px, cx, cy, accent, alpha);
         }
         else if (kind == 1)
         {
-            DrawRoundedRect(batch, px, cx - 11f, cy - 11f, 22f, 22f, 6f,
-                accent[0], accent[1], accent[2], alpha);
-            DrawRoundedRect(batch, px, cx - 3f, cy - 16f, 6f, 32f, 3f,
-                0.92f, 0.94f, 1f, 0.32f * alpha);
+            DrawLocalAccountGlyph(batch, px, cx, cy, accent, alpha);
+        }
+        else if (kind == 3)
+        {
+            DrawDiscordGlyph(batch, px, cx, cy, accent, alpha);
+        }
+        else if (kind == 4)
+        {
+            DrawSteamGlyph(batch, px, cx, cy, accent, alpha);
         }
         else
         {
-            DrawLine(batch, px, cx + 9f, cy - 10f, cx - 9f, cy, 3f,
+            DrawLine(batch, px, cx + 12f, cy, cx - 10f, cy, 3f,
                 accent[0], accent[1], accent[2], alpha);
-            DrawLine(batch, px, cx - 9f, cy, cx + 9f, cy + 10f, 3f,
+            DrawLine(batch, px, cx - 9f, cy, cx + 1f, cy - 10f, 3f,
+                accent[0], accent[1], accent[2], alpha);
+            DrawLine(batch, px, cx - 9f, cy, cx + 1f, cy + 10f, 3f,
                 accent[0], accent[1], accent[2], alpha);
         }
+    }
+
+    private void DrawGlobeGlyph(SpriteBatch batch, Texture2D px,
+        float cx, float cy, float[] accent, float alpha)
+    {
+        batch.Draw(Engine.CircleTex, cx - 15f, cy - 15f, 30f, 30f,
+            accent[0], accent[1], accent[2], 0.92f * alpha);
+        batch.Draw(Engine.CircleTex, cx - 12f, cy - 12f, 24f, 24f,
+            0.018f, 0.020f, 0.028f, 0.92f * alpha);
+
+        DrawRoundedRect(batch, px, cx - 10f, cy - 1f, 20f, 2f, 1f,
+            accent[0], accent[1], accent[2], 0.88f * alpha);
+        DrawRoundedRect(batch, px, cx - 7f, cy - 8f, 14f, 2f, 1f,
+            accent[0], accent[1], accent[2], 0.58f * alpha);
+        DrawRoundedRect(batch, px, cx - 7f, cy + 6f, 14f, 2f, 1f,
+            accent[0], accent[1], accent[2], 0.58f * alpha);
+        DrawRoundedRect(batch, px, cx - 1f, cy - 10f, 2f, 20f, 1f,
+            accent[0], accent[1], accent[2], 0.74f * alpha);
+        DrawRoundedRect(batch, px, cx - 7f, cy - 9f, 2f, 18f, 1f,
+            accent[0], accent[1], accent[2], 0.40f * alpha);
+        DrawRoundedRect(batch, px, cx + 5f, cy - 9f, 2f, 18f, 1f,
+            accent[0], accent[1], accent[2], 0.40f * alpha);
+    }
+
+    private void DrawLocalAccountGlyph(SpriteBatch batch, Texture2D px,
+        float cx, float cy, float[] accent, float alpha)
+    {
+        DrawRoundedRect(batch, px, cx - 16f, cy - 13f, 32f, 22f, 4f,
+            accent[0], accent[1], accent[2], 0.92f * alpha);
+        DrawRoundedRect(batch, px, cx - 13f, cy - 10f, 26f, 16f, 2f,
+            0.018f, 0.020f, 0.028f, 0.92f * alpha);
+
+        batch.Draw(Engine.CircleTex, cx - 4f, cy - 7f, 8f, 8f,
+            0.92f, 0.94f, 1f, 0.86f * alpha);
+        DrawRoundedRect(batch, px, cx - 8f, cy + 2f, 16f, 6f, 3f,
+            0.92f, 0.94f, 1f, 0.70f * alpha);
+
+        DrawRoundedRect(batch, px, cx - 3f, cy + 9f, 6f, 6f, 2f,
+            accent[0], accent[1], accent[2], 0.82f * alpha);
+        DrawRoundedRect(batch, px, cx - 11f, cy + 15f, 22f, 3f, 1.5f,
+            accent[0], accent[1], accent[2], 0.82f * alpha);
+    }
+
+    private void DrawDiscordGlyph(SpriteBatch batch, Texture2D px,
+        float cx, float cy, float[] accent, float alpha)
+    {
+        DrawRoundedRect(batch, px, cx - 15f, cy - 10f, 30f, 20f, 7f,
+            accent[0], accent[1], accent[2], 0.92f * alpha);
+        DrawRoundedRect(batch, px, cx - 10f, cy + 7f, 7f, 8f, 3f,
+            accent[0], accent[1], accent[2], 0.80f * alpha);
+        DrawRoundedRect(batch, px, cx + 3f, cy + 7f, 7f, 8f, 3f,
+            accent[0], accent[1], accent[2], 0.80f * alpha);
+        batch.Draw(Engine.CircleTex, cx - 8f, cy - 2f, 5f, 5f,
+            0.018f, 0.020f, 0.028f, 0.95f * alpha);
+        batch.Draw(Engine.CircleTex, cx + 3f, cy - 2f, 5f, 5f,
+            0.018f, 0.020f, 0.028f, 0.95f * alpha);
+    }
+
+    private void DrawSteamGlyph(SpriteBatch batch, Texture2D px,
+        float cx, float cy, float[] accent, float alpha)
+    {
+        batch.Draw(Engine.CircleTex, cx - 15f, cy - 15f, 30f, 30f,
+            accent[0], accent[1], accent[2], 0.92f * alpha);
+        batch.Draw(Engine.CircleTex, cx + 3f, cy - 11f, 13f, 13f,
+            0.018f, 0.020f, 0.028f, 0.95f * alpha);
+        batch.Draw(Engine.CircleTex, cx + 6f, cy - 8f, 7f, 7f,
+            accent[0], accent[1], accent[2], 0.82f * alpha);
+        DrawLine(batch, px, cx - 10f, cy + 8f, cx + 2f, cy + 1f, 4f,
+            0.018f, 0.020f, 0.028f, 0.88f * alpha);
+        batch.Draw(Engine.CircleTex, cx - 15f, cy + 3f, 12f, 12f,
+            0.018f, 0.020f, 0.028f, 0.95f * alpha);
+        batch.Draw(Engine.CircleTex, cx - 12f, cy + 6f, 6f, 6f,
+            accent[0], accent[1], accent[2], 0.82f * alpha);
     }
 
     private void DrawScrollMarker(SpriteBatch batch, Texture2D px,
@@ -689,27 +1062,18 @@ public sealed class ProfileSelectScreen : Screen
 
     private void DrawContentMatte(SpriteBatch batch, Texture2D px, int sw, int sh)
     {
-        if (_mode == ProfileMode.Browse)
-        {
-            var layout = GetListLayout(sw, sh);
-            float laneW = MathF.Min(sw * 0.50f, layout.X + layout.Width + 150f);
-            batch.Draw(px, 0, 0, laneW, sh, 0f, 0f, 0f, 0.38f);
+        var layout = GetListLayout(sw, sh);
+        float laneW = MathF.Min(sw * (_mode == ProfileMode.Browse ? 0.50f : 0.48f),
+            layout.X + layout.Width + (_mode == ProfileMode.Browse ? 150f : 100f));
+        batch.Draw(px, 0, 0, laneW, sh, 0f, 0f, 0f,
+            _mode == ProfileMode.Browse ? 0.38f : 0.34f);
 
-            for (int i = 0; i < 14; i++)
-            {
-                float stripeW = 18f;
-                float x = laneW + i * stripeW;
-                float alpha = 0.030f * (1f - i / 14f);
-                batch.Draw(px, x, 0, stripeW + 1f, sh, 0f, 0f, 0f, alpha);
-            }
-        }
-        else
+        for (int i = 0; i < 14; i++)
         {
-            float bandY = TaikoGame.GlobalTopBarHeight + 114f;
-            float bandH = MathF.Min(430f, sh - bandY - 54f);
-            batch.Draw(px, 0, bandY, sw, bandH, 0f, 0f, 0f, 0.32f);
-            batch.Draw(px, 0, bandY - 34f, sw, 34f, 0f, 0f, 0f, 0.13f);
-            batch.Draw(px, 0, bandY + bandH, sw, 38f, 0f, 0f, 0f, 0.16f);
+            float stripeW = 18f;
+            float x = laneW + i * stripeW;
+            float alpha = 0.030f * (1f - i / 14f);
+            batch.Draw(px, x, 0, stripeW + 1f, sh, 0f, 0f, 0f, alpha);
         }
     }
 
@@ -935,18 +1299,30 @@ public sealed class ProfileSelectScreen : Screen
 
     private (float X, float Y, float Width) GetOptionLayout(int sw, int sh)
     {
-        float width = Math.Clamp(sw * 0.42f, 440f, 620f);
-        float x = (sw - width) * 0.5f;
-        float y = TaikoGame.GlobalTopBarHeight + 190f;
-        if (sh < 650f)
-            y = TaikoGame.GlobalTopBarHeight + 130f;
+        var list = GetListLayout(sw, sh);
+        float gap = Math.Clamp(sw * 0.035f, 36f, 70f);
+        float rightPad = Math.Clamp(sw * 0.04f, 42f, 84f);
+        float x = list.X + list.Width + gap;
+        float width = Math.Clamp(sw * 0.34f, 360f, 540f);
+        float available = sw - x - rightPad;
+        if (available < width)
+            width = MathF.Max(320f, available);
+        if (width < 360f)
+            x = MathF.Max(list.X + list.Width * 0.72f, sw - width - 34f);
+
+        float y = list.Y - _scrollOffset;
+        float menuH = 3f * (RowH + RowGap) - RowGap;
+        float minY = TaikoGame.GlobalTopBarHeight + 118f;
+        float maxY = sh - menuH - 68f;
+        y = Math.Clamp(y, minY, MathF.Max(minY, maxY));
         return (x, y, width);
     }
 
     private (float X, float Y, float W, float H) GetCreateButtonRect()
     {
         var layout = GetOptionLayout(Engine.ScreenWidth, Engine.ScreenHeight);
-        return (layout.X + 150f, layout.Y + 142f, 230f, 42f);
+        float w = MathF.Min(230f, MathF.Max(180f, layout.Width - 150f));
+        return (layout.X + layout.Width - w, layout.Y + 144f, w, 42f);
     }
 
     private void DrawRoundedRect(SpriteBatch batch, Texture2D px,

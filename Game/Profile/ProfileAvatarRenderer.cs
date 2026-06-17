@@ -1,14 +1,20 @@
 using TaikoNova.Engine.GL;
+using StbImageSharp;
 
 namespace TaikoNova.Game.Profile;
 
 public static class ProfileAvatarRenderer
 {
+    private static readonly Dictionary<string, Texture2D?> AvatarCache = new(StringComparer.OrdinalIgnoreCase);
+
     public static void Draw(SpriteBatch batch, Texture2D px, Texture2D circle,
         PlayerProfile? profile, float x, float y, float size, float alpha = 1f)
     {
         int seed = profile?.AvatarSeed ?? 0x4257;
         var accent = GetAccent(seed);
+
+        if (TryDrawImageAvatar(batch, circle, profile, x, y, size, accent, alpha))
+            return;
 
         batch.Draw(circle, x, y, size, size,
             0.030f, 0.034f, 0.048f, 0.92f * alpha);
@@ -45,6 +51,76 @@ public static class ProfileAvatarRenderer
                 size * 0.06f, size * 0.44f, 0.92f, 0.94f, 1f, 0.88f * alpha);
             batch.Draw(px, x + size * 0.30f, y + size * 0.47f,
                 size * 0.44f, size * 0.06f, 0.92f, 0.94f, 1f, 0.88f * alpha);
+        }
+    }
+
+    private static bool TryDrawImageAvatar(SpriteBatch batch, Texture2D circle,
+        PlayerProfile? profile, float x, float y, float size,
+        (float R, float G, float B) accent, float alpha)
+    {
+        string? path = profile?.AvatarImagePath;
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            return false;
+
+        if (!AvatarCache.TryGetValue(path, out var avatar))
+        {
+            avatar = LoadCircularAvatar(path);
+            AvatarCache[path] = avatar;
+        }
+
+        if (avatar == null)
+            return false;
+
+        batch.Draw(circle, x, y, size, size,
+            0.030f, 0.034f, 0.048f, 0.96f * alpha);
+        batch.Draw(circle, x + size * 0.05f, y + size * 0.05f,
+            size * 0.90f, size * 0.90f,
+            accent.R * 0.20f, accent.G * 0.20f, accent.B * 0.20f, 0.72f * alpha);
+        batch.Draw(avatar, x + size * 0.08f, y + size * 0.08f,
+            size * 0.84f, size * 0.84f, 1f, 1f, 1f, alpha);
+        return true;
+    }
+
+    private static Texture2D? LoadCircularAvatar(string path)
+    {
+        try
+        {
+            StbImage.stbi_set_flip_vertically_on_load(0);
+            using var stream = File.OpenRead(path);
+            var image = ImageResult.FromStream(stream, ColorComponents.RedGreenBlueAlpha);
+            int srcSize = Math.Min(image.Width, image.Height);
+            if (srcSize <= 0) return null;
+
+            int srcX = (image.Width - srcSize) / 2;
+            int srcY = (image.Height - srcSize) / 2;
+            byte[] pixels = new byte[srcSize * srcSize * 4];
+            float center = srcSize * 0.5f;
+            float radius = center - 1.5f;
+
+            for (int y = 0; y < srcSize; y++)
+            {
+                for (int x = 0; x < srcSize; x++)
+                {
+                    int si = ((srcY + y) * image.Width + srcX + x) * 4;
+                    int di = (y * srcSize + x) * 4;
+                    pixels[di] = image.Data[si];
+                    pixels[di + 1] = image.Data[si + 1];
+                    pixels[di + 2] = image.Data[si + 2];
+
+                    float dx = x - center + 0.5f;
+                    float dy = y - center + 0.5f;
+                    float dist = MathF.Sqrt(dx * dx + dy * dy);
+                    float mask = Math.Clamp(radius - dist + 1.0f, 0f, 1f);
+                    pixels[di + 3] = (byte)(image.Data[si + 3] * mask);
+                }
+            }
+
+            return Texture2D.FromPixels(srcSize, srcSize, pixels);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Profiles] Failed to load online avatar: {ex.Message}");
+            return null;
         }
     }
 

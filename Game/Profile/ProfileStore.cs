@@ -15,6 +15,7 @@ public sealed class ProfileStore
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "TaikoNova");
     private static readonly string ProfilesPath = Path.Combine(ConfigDir, "profiles.json");
     private static readonly string LeaderboardsDir = Path.Combine(ConfigDir, "leaderboards");
+    private static readonly string AvatarsDir = Path.Combine(ConfigDir, "avatars");
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -28,6 +29,7 @@ public sealed class ProfileStore
     public PlayerProfile? CurrentProfile { get; private set; }
     public string ProfilesFilePath => ProfilesPath;
     public string LeaderboardsDirectory => LeaderboardsDir;
+    public string AvatarsDirectory => AvatarsDir;
 
     public static ProfileStore Load()
     {
@@ -52,6 +54,46 @@ public sealed class ProfileStore
         _data.Profiles.Add(profile);
         SetActiveProfile(profile);
         EnsureLocalLeaderboardFile(profile);
+        Save();
+        return profile;
+    }
+
+    public PlayerProfile CreateOrUpdateOnlineProfile(OnlineAuthResult login)
+    {
+        string provider = SanitizeKey(login.Provider).ToLowerInvariant();
+        string accountId = SanitizeKey(login.AccountId);
+        string name = SanitizeName(login.Username);
+        if (string.IsNullOrWhiteSpace(provider) || string.IsNullOrWhiteSpace(accountId))
+            throw new InvalidOperationException("Online account response did not include a provider/account id.");
+
+        var profile = _data.Profiles.FirstOrDefault(p =>
+            p.Kind == PlayerProfileKind.Online
+            && string.Equals(p.OnlineProvider, provider, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(p.OnlineAccountId, accountId, StringComparison.Ordinal));
+
+        bool created = profile == null;
+        profile ??= new PlayerProfile
+        {
+            Id = $"online-{provider}-{accountId}",
+            Kind = PlayerProfileKind.Online,
+            AvatarSeed = StableSeed($"{provider}:{accountId}"),
+            CreatedUtc = DateTime.UtcNow
+        };
+
+        profile.Name = name;
+        profile.OnlineProvider = provider;
+        profile.OnlineAccountId = accountId;
+        profile.AvatarUrl = login.AvatarUrl;
+        profile.LastUsedUtc = DateTime.UtcNow;
+
+        string avatarPath = SaveOnlineAvatar(provider, accountId, login.AvatarImage, login.AvatarContentType);
+        if (!string.IsNullOrEmpty(avatarPath))
+            profile.AvatarImagePath = avatarPath;
+
+        if (created)
+            _data.Profiles.Add(profile);
+
+        SetActiveProfile(profile);
         Save();
         return profile;
     }
@@ -93,6 +135,7 @@ public sealed class ProfileStore
         {
             Directory.CreateDirectory(ConfigDir);
             Directory.CreateDirectory(LeaderboardsDir);
+            Directory.CreateDirectory(AvatarsDir);
 
             if (!File.Exists(ProfilesPath))
             {
@@ -127,6 +170,7 @@ public sealed class ProfileStore
         {
             Directory.CreateDirectory(ConfigDir);
             Directory.CreateDirectory(LeaderboardsDir);
+            Directory.CreateDirectory(AvatarsDir);
             string json = JsonSerializer.Serialize(_data, JsonOptions);
             File.WriteAllText(ProfilesPath, json);
         }
@@ -166,5 +210,50 @@ public sealed class ProfileStore
         if (name.Length > 18)
             name = name[..18].Trim();
         return name;
+    }
+
+    private static string SaveOnlineAvatar(string provider, string accountId, byte[]? bytes, string contentType)
+    {
+        if (bytes == null || bytes.Length == 0) return "";
+
+        try
+        {
+            Directory.CreateDirectory(AvatarsDir);
+            string ext = contentType.Contains("jpeg", StringComparison.OrdinalIgnoreCase)
+                || contentType.Contains("jpg", StringComparison.OrdinalIgnoreCase)
+                    ? ".jpg"
+                    : ".png";
+            string fileName = $"{SanitizeKey(provider)}-{SanitizeKey(accountId)}{ext}";
+            string path = Path.Combine(AvatarsDir, fileName);
+            File.WriteAllBytes(path, bytes);
+            return path;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Profiles] Failed to save online avatar: {ex.Message}");
+            return "";
+        }
+    }
+
+    private static string SanitizeKey(string value)
+    {
+        string safe = new(value
+            .Where(c => char.IsAsciiLetterOrDigit(c) || c == '-' || c == '_' || c == '.')
+            .ToArray());
+        return safe.Trim();
+    }
+
+    private static int StableSeed(string value)
+    {
+        unchecked
+        {
+            uint hash = 2166136261u;
+            foreach (char c in value)
+            {
+                hash ^= c;
+                hash *= 16777619u;
+            }
+            return (int)hash;
+        }
     }
 }
