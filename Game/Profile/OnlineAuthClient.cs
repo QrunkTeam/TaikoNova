@@ -28,6 +28,14 @@ public static class OnlineAuthClient
         Timeout = TimeSpan.FromSeconds(30)
     };
 
+    private static readonly HttpClient NoRedirectHttp = new(new HttpClientHandler
+    {
+        AllowAutoRedirect = false
+    })
+    {
+        Timeout = TimeSpan.FromSeconds(15)
+    };
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true
@@ -47,8 +55,8 @@ public static class OnlineAuthClient
             throw new OnlineAuthException("Could not start local Discord callback listener.", ex);
         }
 
-        string startUrl = $"{BackendBaseUrl}/auth/discord/start?redirect_uri={Uri.EscapeDataString(DiscordRedirectUri)}";
-        OpenBrowser(startUrl);
+        string authorizeUrl = await GetDiscordAuthorizeUrlAsync(cancellationToken);
+        OpenBrowser(authorizeUrl);
 
         HttpListenerContext context;
         try
@@ -61,16 +69,25 @@ public static class OnlineAuthClient
             throw new OnlineAuthException("Discord login timed out.", ex);
         }
 
-        await WriteBrowserClosePageAsync(context.Response, cancellationToken);
-
         string? error = context.Request.QueryString["error"];
         if (!string.IsNullOrWhiteSpace(error))
+        {
+            await WriteBrowserClosePageAsync(context.Response,
+                "TaikoNova login failed", "Discord returned an error. You can return to the game.", cancellationToken);
             throw new OnlineAuthException($"Discord login failed: {error}");
+        }
 
         string? code = context.Request.QueryString["code"];
         string? state = context.Request.QueryString["state"];
         if (string.IsNullOrWhiteSpace(code) || string.IsNullOrWhiteSpace(state))
+        {
+            await WriteBrowserClosePageAsync(context.Response,
+                "TaikoNova login failed", "Discord did not return a login code. You can return to the game.", cancellationToken);
             throw new OnlineAuthException("Discord did not return a login code.");
+        }
+
+        await WriteBrowserClosePageAsync(context.Response,
+            "TaikoNova login complete", "You can return to the game now.", cancellationToken);
 
         var exchange = new DiscordExchangeRequest
         {
@@ -80,6 +97,38 @@ public static class OnlineAuthClient
         };
 
         return await ExchangeAsync($"{BackendBaseUrl}/auth/discord/exchange", exchange, cancellationToken);
+    }
+
+    private static async Task<string> GetDiscordAuthorizeUrlAsync(CancellationToken cancellationToken)
+    {
+        string startUrl = $"{BackendBaseUrl}/auth/discord/start?redirect_uri={Uri.EscapeDataString(DiscordRedirectUri)}";
+
+        HttpResponseMessage response;
+        try
+        {
+            response = await NoRedirectHttp.GetAsync(startUrl, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            throw new OnlineAuthException("Online backend is not reachable. Start the TaikoNova backend and try again.", ex);
+        }
+
+        using (response)
+        {
+            if ((int)response.StatusCode >= 300 && (int)response.StatusCode < 400
+                && response.Headers.Location != null)
+            {
+                return response.Headers.Location.IsAbsoluteUri
+                    ? response.Headers.Location.ToString()
+                    : new Uri(new Uri(BackendBaseUrl), response.Headers.Location).ToString();
+            }
+
+            string responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+            string detail = TryReadError(responseBody);
+            throw new OnlineAuthException(string.IsNullOrWhiteSpace(detail)
+                ? $"Discord login could not start. Backend returned status {(int)response.StatusCode}."
+                : detail);
+        }
     }
 
     public static async Task<OnlineAuthResult> LoginWithSteamAsync(CancellationToken cancellationToken = default)
@@ -158,15 +207,15 @@ public static class OnlineAuthClient
     }
 
     private static async Task WriteBrowserClosePageAsync(
-        HttpListenerResponse response, CancellationToken cancellationToken)
+        HttpListenerResponse response, string title, string message, CancellationToken cancellationToken)
     {
-        const string html = """
+        string html = $$"""
             <!doctype html>
             <html>
-            <head><meta charset="utf-8"><title>TaikoNova Login</title></head>
+            <head><meta charset="utf-8"><title>{{WebUtility.HtmlEncode(title)}}</title></head>
             <body style="font-family: system-ui; background: #10121a; color: #eef; padding: 32px;">
-            <h1>TaikoNova login complete</h1>
-            <p>You can return to the game now.</p>
+            <h1>{{WebUtility.HtmlEncode(title)}}</h1>
+            <p>{{WebUtility.HtmlEncode(message)}}</p>
             </body>
             </html>
             """;
